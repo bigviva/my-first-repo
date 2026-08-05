@@ -2,6 +2,7 @@
 import os
 import sqlite3
 from contextlib import contextmanager
+from typing import Optional
 
 DB_PATH = os.environ.get("CAT_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "data", "corrective_actions.db"))
 
@@ -126,7 +127,7 @@ CREATE INDEX IF NOT EXISTS idx_notifications_record ON notifications(record_type
 """
 
 
-def init_db(path: str | None = None) -> None:
+def init_db(path: Optional[str] = None) -> None:
     target = path or DB_PATH
     os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
     with sqlite3.connect(target) as conn:
@@ -134,7 +135,7 @@ def init_db(path: str | None = None) -> None:
 
 
 @contextmanager
-def get_conn(path: str | None = None):
+def get_conn(path: Optional[str] = None):
     target = path or DB_PATH
     conn = sqlite3.connect(target)
     conn.row_factory = sqlite3.Row

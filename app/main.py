@@ -15,6 +15,7 @@ import os
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import date
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -36,7 +37,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Corrective Actions Tracking System", version="1.0.0", lifespan=lifespan)
 
 
-def _row(row: sqlite3.Row | None) -> dict:
+def _row(row: Optional[sqlite3.Row]) -> dict:
     return dict(row) if row is not None else {}
 
 
