@@ -58,6 +58,7 @@ app = FastAPI(title="Corrective Actions Tracking System", version="1.0.0", lifes
 
 
 def _row(row: Optional[sqlite3.Row]) -> dict:
+    """Convert a fetched row to a plain dict ({} when the query found nothing)."""
     return dict(row) if row is not None else {}
 
 
@@ -80,11 +81,14 @@ def _owner_name(conn, owner_id) -> str:
 
 
 def _is_overdue(record: dict) -> bool:
+    """Open past its due date. Dates are fixed-width YYYY-MM-DD, so string
+    comparison is a correct date comparison."""
     due = record.get("due_date")
     return bool(due) and record.get("status") != "Closed" and due < date.today().isoformat()
 
 
 def _with_meta(conn, record: dict) -> dict:
+    """Decorate an API-bound record with owner_name and the overdue flag."""
     record["owner_name"] = _owner_name(conn, record.get("owner_id"))
     record["overdue"] = _is_overdue(record)
     return record
@@ -140,6 +144,8 @@ def change_password(body: m.PasswordChange, user: dict = Depends(auth.current_us
 
 @app.get("/api/dashboard")
 def dashboard(user: dict = Depends(auth.forbid_supplier)) -> dict:
+    """Live counts per entity (open/closed/overdue/by-status), escalated
+    escapes, CAPA effectiveness rate, and the most recent history entries."""
     with db.get_conn() as conn:
         out: dict = {}
         for table, key in (("escapes", "escapes"), ("cars", "cars"), ("capas", "capas")):
@@ -170,6 +176,7 @@ def dashboard(user: dict = Depends(auth.forbid_supplier)) -> dict:
 
 @app.get("/api/analytics")
 def get_analytics(user: dict = Depends(auth.forbid_supplier)) -> dict:
+    """Trend/aging/Pareto aggregations for the Analytics tab (see app/analytics.py)."""
     with db.get_conn() as conn:
         return analytics.compute(conn)
 
@@ -266,6 +273,8 @@ def get_escape(escape_id: int, user: dict = Depends(auth.forbid_supplier)) -> di
 
 @app.post("/api/escapes", status_code=201)
 def create_escape(body: m.EscapeIn, user: dict = Depends(auth.require_writer)) -> dict:
+    """Create an escape. Rating and escalation level are computed server-side
+    from severity x likelihood; a non-None escalation notifies quality management."""
     with db.get_conn() as conn:
         score, level = rating.rate(body.severity, body.likelihood)
         ref = db.next_ref(conn, "escapes", "ESC")
@@ -312,6 +321,8 @@ def update_escape(escape_id: int, body: m.EscapeUpdate,
 @app.post("/api/escapes/{escape_id}/status")
 def escape_status(escape_id: int, body: m.StatusChange,
                   user: dict = Depends(auth.require_writer)) -> dict:
+    """Move an escape along its workflow (ESCAPE_TRANSITIONS). Closure is
+    refused until a containment plan is on file."""
     with db.get_conn() as conn:
         rec = _row(_get_or_404(conn, "escapes", escape_id))
         allowed = ESCAPE_TRANSITIONS.get(rec["status"], set())
@@ -424,6 +435,8 @@ def update_car(car_id: int, body: m.CarUpdate,
 def _car_transition(conn, car_id: int, from_statuses: set[str], to_status: str,
                     action: str, detail: str, extra_sql: str = "", extra_params: tuple = (),
                     changed_by: str = "system"):
+    """Shared CAR workflow step: enforce the allowed source statuses, apply the
+    transition (plus any extra column updates), and write the history entry."""
     rec = _row(_get_or_404(conn, "cars", car_id))
     if rec["status"] not in from_statuses:
         raise HTTPException(

@@ -85,6 +85,16 @@ matched case-insensitively and unrecognized columns are ignored.
 python -m pytest
 ```
 
+## Documentation
+
+- **docs/ARCHITECTURE.md** — system design, data model, workflow state
+  machines, security model, known scale limits
+- **docs/API.md** — every endpoint with required roles and workflow notes
+  (interactive version at `/docs`)
+- **docs/USER_GUIDE.md** — how to work escapes, CARs, and CAPAs; written for
+  pilot users
+- **DEPLOYMENT.md** — pilot → SSO → PostgreSQL → production rollout path
+
 ## Architecture
 
 - `app/main.py` — FastAPI routes and workflow rules (status transition enforcement)
