@@ -67,6 +67,16 @@ is what makes the history auditable.
    of effective closures in that root-cause category, balanced against their
    current open load.
 
+## Attachments & exports
+
+Every escape, CAR, and CAPA detail page has an **Attachments** panel — upload
+evidence (photos, 8D reports, inspection data; 25 MB max). Suppliers can
+attach files to their own CARs. Removal is quality/admin only, and every
+upload/removal is in the record's history.
+
+Each list view has an **Export CSV** button that downloads exactly what
+you're looking at (current search + status filter) for Excel.
+
 ## Dashboard & Analytics
 
 - **Dashboard**: live counts — open, closed, overdue, escalated — plus recent

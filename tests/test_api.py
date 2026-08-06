@@ -357,3 +357,111 @@ def test_admin_can_deactivate_user(client):
                       json={"email": "temp@example.com", "password": "temp-pw-123"}).status_code == 200
         client.patch(f"/api/users/{u['id']}", json={"active": False})
         assert t.get("/api/dashboard").status_code == 401
+
+
+@pytest.fixture()
+def attach_dir(tmp_path, monkeypatch):
+    d = str(tmp_path / "attachments")
+    from app import attachments
+    monkeypatch.setattr(attachments, "ATTACH_DIR", d)
+    return d
+
+
+def _upload(c, record_type, record_id, filename="evidence.pdf", content=b"%PDF-1.4 test"):
+    return c.post(f"/api/attachments/{record_type}/{record_id}",
+                  files={"file": (filename, io.BytesIO(content), "application/pdf")})
+
+
+def test_attachment_lifecycle(client, attach_dir):
+    esc = client.post("/api/escapes", json={"title": "Escape with evidence"}).json()
+    up = _upload(client, "escape", esc["id"])
+    assert up.status_code == 201
+    att = up.json()
+    assert att["filename"] == "evidence.pdf"
+    assert att["size_bytes"] > 0
+
+    detail = client.get(f"/api/escapes/{esc['id']}").json()
+    assert len(detail["attachments"]) == 1
+    assert detail["attachments"][0]["uploaded_by_name"] == "Administrator"
+    assert any(h["action"] == "attachment-added" for h in detail["history"])
+
+    dl = client.get(f"/api/attachments/{att['id']}/download")
+    assert dl.status_code == 200
+    assert dl.content == b"%PDF-1.4 test"
+
+    assert client.delete(f"/api/attachments/{att['id']}").status_code == 200
+    assert client.get(f"/api/attachments/{att['id']}/download").status_code == 404
+    assert client.get(f"/api/escapes/{esc['id']}").json()["attachments"] == []
+
+
+def test_attachment_rules(client, attach_dir):
+    esc = client.post("/api/escapes", json={"title": "E"}).json()
+    # disallowed extension
+    bad = _upload(client, "escape", esc["id"], filename="malware.exe")
+    assert bad.status_code == 400
+    # empty file
+    empty = _upload(client, "escape", esc["id"], content=b"")
+    assert empty.status_code == 400
+    # unknown record type
+    assert _upload(client, "bulletin", 1).status_code == 404
+
+
+def test_attachment_supplier_scoping(client, attach_dir):
+    client.post("/api/users", json={
+        "name": "Supp", "email": "supp@x.com", "role": "supplier",
+        "password": "supplier-pw", "supplier_name": "WeldCo"})
+    mine = client.post("/api/cars", json={
+        "title": "Mine", "car_type": "external", "supplier": "WeldCo"}).json()
+    other = client.post("/api/cars", json={
+        "title": "Other", "car_type": "external", "supplier": "OtherCo"}).json()
+    other_att = _upload(client, "car", other["id"]).json()
+    esc = client.post("/api/escapes", json={"title": "Internal"}).json()
+
+    from app.main import app
+    with TestClient(app) as s:
+        s.post("/api/auth/login", json={"email": "supp@x.com", "password": "supplier-pw"})
+        # can attach evidence to own CAR
+        assert _upload(s, "car", mine["id"]).status_code == 201
+        # cannot touch other suppliers' CARs or internal records
+        assert _upload(s, "car", other["id"]).status_code == 403
+        assert _upload(s, "escape", esc["id"]).status_code == 403
+        assert s.get(f"/api/attachments/{other_att['id']}/download").status_code == 403
+        # cannot delete even their own (writer-only)
+        own = s.get(f"/api/cars/{mine['id']}").json()["attachments"][0]
+        assert s.delete(f"/api/attachments/{own['id']}").status_code == 403
+
+
+def test_viewer_cannot_upload(client, attach_dir):
+    client.post("/api/users", json={
+        "name": "V", "email": "v2@x.com", "role": "viewer", "password": "viewer-pw-2"})
+    esc = client.post("/api/escapes", json={"title": "E"}).json()
+    from app.main import app
+    with TestClient(app) as v:
+        v.post("/api/auth/login", json={"email": "v2@x.com", "password": "viewer-pw-2"})
+        assert _upload(v, "escape", esc["id"]).status_code == 403
+
+
+def test_csv_export(client):
+    client.post("/api/escapes", json={"title": "Exported one", "customer": "ACME"})
+    client.post("/api/escapes", json={"title": "Filtered out"})
+    r = client.get("/api/export/escapes")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=" in r.headers["content-disposition"]
+    body = r.text
+    assert "Exported one" in body and "Filtered out" in body
+    assert "owner_name" in body.splitlines()[0]
+
+    filtered = client.get("/api/export/escapes?q=Exported").text
+    assert "Exported one" in filtered and "Filtered out" not in filtered
+
+    assert client.get("/api/export/nonsense").status_code == 404
+
+    # suppliers cannot export
+    client.post("/api/users", json={
+        "name": "S2", "email": "s2@x.com", "role": "supplier",
+        "password": "supplier-pw2", "supplier_name": "X"})
+    from app.main import app
+    with TestClient(app) as s:
+        s.post("/api/auth/login", json={"email": "s2@x.com", "password": "supplier-pw2"})
+        assert s.get("/api/export/cars").status_code == 403

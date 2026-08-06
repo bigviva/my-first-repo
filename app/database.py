@@ -115,6 +115,20 @@ CREATE TABLE IF NOT EXISTS bulletins (
     issued_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_type TEXT NOT NULL CHECK (record_type IN ('escape', 'car', 'capa')),
+    record_id INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL DEFAULT '',
+    size_bytes INTEGER NOT NULL,
+    stored_name TEXT NOT NULL UNIQUE,
+    uploaded_by INTEGER REFERENCES users(id),
+    uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_attachments_record ON attachments(record_type, record_id);
+
 CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     record_type TEXT NOT NULL CHECK (record_type IN ('escape', 'car', 'capa', 'bulletin')),

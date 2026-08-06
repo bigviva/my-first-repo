@@ -47,6 +47,8 @@ an audit trail, and built-in recommendations from historical data.
   escalation distribution, CAR first-pass acceptance rate (`/api/analytics`,
   rendered as dependency-free SVG charts on the Analytics tab)
 - CSV import to migrate existing spreadsheet data (Escapes, CARs, CAPAs)
+- File attachments on every record (evidence photos, 8D reports; 25 MB,
+  type-allowlisted, supplier-scoped) and filtered CSV export on every list
 
 ## Running it
 

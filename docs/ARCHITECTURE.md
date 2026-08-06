@@ -39,6 +39,7 @@ are isolated behind small seams.
 | `app/recommendations.py` | Cosine similarity over token counts; CAR response recs, CAPA RCCA assist, assignment suggestions | — |
 | `app/analytics.py` | Dashboard/analytics aggregations (trends, cycle times, aging, Pareto) | — |
 | `app/notify.py` | SMTP email delivery, recipient resolution (email / user name) | — |
+| `app/attachments.py` | Evidence file storage: allowlist + size enforcement, random on-disk names, metadata rows | — |
 | `app/seed.py` | Demo data + demo accounts for local evaluation | `database`, `auth`, `rating` |
 | `static/` | SPA: router, views, forms, SVG charts, login screen | the API only |
 
@@ -56,6 +57,7 @@ escapes ──< cars ──< capas
 
 history        (record_type, record_id) — append-only audit trail, all entities
 notifications  (record_type, record_id) — outbound message log, all entities
+attachments    (record_type, record_id) — evidence file metadata; bytes on disk
 sessions       (token → user_id) — server-side login sessions
 ```
 

@@ -84,6 +84,26 @@ Errors are JSON: `{"detail": "..."}` with 400 (bad transition/validation),
 | `GET /api/analytics` | internal | 12-month trend, cycle times, aging, Pareto, rates |
 | `POST /api/run-escalation` | writer | Manual overdue sweep (also runs nightly) |
 
+## Attachments
+
+Evidence files (photos, 8D reports, inspection data). 25 MB limit; extension
+allowlist (pdf, images, office docs, csv, txt, zip, msg/eml). Files are stored
+under random names on disk — the original filename is metadata only.
+
+| Method & path | Role | Notes |
+|---|---|---|
+| `POST /api/attachments/{record_type}/{record_id}` | writer, or own supplier (CARs) | Multipart upload; `record_type` ∈ `escape`/`car`/`capa`; viewers 403 |
+| `GET /api/attachments/{id}/download` | any with record visibility | Original filename restored; supplier scoping enforced via the parent record |
+| `DELETE /api/attachments/{id}` | writer | Removes file + metadata; logged in history |
+
+Each record detail response includes its `attachments` array with uploader names.
+
+## Exports
+
+| Method & path | Role | Notes |
+|---|---|---|
+| `GET /api/export/{entity}` | internal | `escapes`/`cars`/`capas` as CSV download; honors `status` and `q` filters; includes `owner_name` |
+
 ## Import
 
 | Method & path | Role | Notes |

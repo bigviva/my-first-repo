@@ -56,7 +56,7 @@ managed PostgreSQL instance with automated backups.
 ## 4. Operations checklist before wide rollout
 
 - [ ] HTTPS via company reverse proxy / load balancer
-- [ ] Daily database backups tested with a restore drill
+- [ ] Daily backups of the database AND the attachments directory (`CAT_ATTACHMENTS_DIR`), tested with a restore drill
 - [ ] Log aggregation (uvicorn access logs + app stdout)
 - [ ] Uptime monitoring on `/api/dashboard` (any 200 with a valid session)
 - [ ] SMTP relay approved for the notification sender address
@@ -66,8 +66,7 @@ managed PostgreSQL instance with automated backups.
 
 ## 5. Known not-yet-built (next development phases)
 
-- File attachments on records (evidence photos, 8D reports)
-- OIDC/SSO login flow (the seam exists; the flow does not)
-- PostgreSQL support (see §3)
-- Report exports (CSV/PDF of filtered lists)
+- OIDC/SSO login flow (the seam exists; the flow does not) — blocked on IT
+- PostgreSQL support (see §3) — blocked on IT provisioning
+- Virus scanning on attachment upload (hook point: `app/attachments.py:store`)
 - E-signature-grade approval records, if AS9100 auditors require them

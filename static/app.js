@@ -78,6 +78,58 @@ function historyHtml(items) {
     </div>`).join("");
 }
 
+
+/* ------------------------------------------------------- attachments UI */
+
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(1) + " MB";
+}
+
+// Panel HTML for a record's attachments. Upload is offered to writers, and to
+// suppliers on their own CARs (the server enforces the same rule).
+function attachmentsPanel(recordType, atts) {
+  const canUpload = canWrite() || (me && me.role === "supplier" && recordType === "car");
+  return `
+    <div class="panel"><h3>Attachments</h3>
+      ${atts.length ? atts.map(a => `
+        <div class="history-item">
+          <a class="link" href="/api/attachments/${a.id}/download">${esc(a.filename)}</a>
+          <span style="color:var(--muted);font-size:12px"> ${fmtBytes(a.size_bytes)}
+            &middot; ${esc(a.uploaded_by_name)} &middot; ${esc(a.uploaded_at)}</span>
+          ${canWrite() ? `<a class="link" style="float:right" data-del-att="${a.id}">Remove</a>` : ""}
+        </div>`).join("")
+      : '<div class="empty">No attachments</div>'}
+      ${canUpload ? `
+        <div class="actions" style="margin-bottom:0">
+          <input type="file" id="att-file">
+          <button class="secondary" id="att-upload">Upload</button>
+        </div>` : ""}
+    </div>`;
+}
+
+// Wire the panel's handlers; refresh() re-renders the parent detail view.
+function wireAttachments(recordType, recordId, refresh) {
+  const btn = document.getElementById("att-upload");
+  if (btn) btn.onclick = async () => {
+    const input = document.getElementById("att-file");
+    if (!input.files.length) { toast("Choose a file first", true); return; }
+    const fd = new FormData();
+    fd.append("file", input.files[0]);
+    try {
+      await api(`/api/attachments/${recordType}/${recordId}`, { method: "POST", body: fd });
+      toast("Attachment uploaded"); refresh();
+    } catch (e) { toast(e.message, true); }
+  };
+  document.querySelectorAll("[data-del-att]").forEach(a => a.onclick = async () => {
+    try {
+      await api(`/api/attachments/${a.dataset.delAtt}`, { method: "DELETE" });
+      refresh();
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
 /* ---------------------------------------------------------------- router */
 
 const views = {};
@@ -142,6 +194,7 @@ views.escapes = async function () {
       <select id="f-type"><option value="">Internal + External</option>
         <option value="internal">Internal</option><option value="external">External</option>
       </select>
+      ${me && me.role !== "supplier" ? '<button class="secondary" id="export">Export CSV</button>' : ""}
       ${canWrite() ? '<button class="primary" id="new">+ New Escape</button>' : ""}
     </div>
     <div id="list"></div>`;
@@ -170,6 +223,12 @@ views.escapes = async function () {
   };
   ["q", "f-status", "f-type"].forEach(id =>
     document.getElementById(id).addEventListener("input", refilter));
+  const export_escapes = document.getElementById("export");
+  if (export_escapes) export_escapes.onclick = () => {
+    const status = document.getElementById("f-status").value;
+    const q = document.getElementById("q").value;
+    window.location = `/api/export/escapes?status=${encodeURIComponent(status)}&q=${encodeURIComponent(q)}`;
+  };
   const newEsc = document.getElementById("new");
   if (newEsc) newEsc.onclick = () => escapeForm();
 };
@@ -270,8 +329,10 @@ async function escapeDetail(id) {
         `<div class="history-item">To <strong>${esc(n.recipient)}</strong>: ${esc(n.message)}<div class="when">${esc(n.sent_at)}</div></div>`).join("")
       : '<div class="empty">None</div>'}
     </div>
+    ${attachmentsPanel("escape", r.attachments || [])}
     <div class="panel"><h3>History</h3>${historyHtml(r.history)}</div>`;
 
+  wireAttachments("escape", id, () => escapeDetail(id));
   document.getElementById("back").onclick = () => navigate("escapes");
   document.querySelectorAll("[data-status]").forEach(b => b.onclick = async () => {
     try {
@@ -341,6 +402,7 @@ views.cars = async function () {
         ${["Draft", "Validated", "Issued", "Response Submitted", "Response Accepted", "Response Rejected", "Closed"]
           .map(s => `<option>${s}</option>`).join("")}
       </select>
+      ${me && me.role !== "supplier" ? '<button class="secondary" id="export">Export CSV</button>' : ""}
       ${canWrite() ? '<button class="primary" id="new">+ New CAR</button>' : ""}
     </div>
     <div id="list"></div>`;
@@ -366,6 +428,12 @@ views.cars = async function () {
     render(await api(`/api/cars?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`));
   };
   ["q", "f-status"].forEach(id => document.getElementById(id).addEventListener("input", refilter));
+  const export_cars = document.getElementById("export");
+  if (export_cars) export_cars.onclick = () => {
+    const status = document.getElementById("f-status").value;
+    const q = document.getElementById("q").value;
+    window.location = `/api/export/cars?status=${encodeURIComponent(status)}&q=${encodeURIComponent(q)}`;
+  };
   const newCar = document.getElementById("new");
   if (newCar) newCar.onclick = () => carForm();
 };
@@ -462,8 +530,10 @@ async function carDetail(id) {
         `<div class="history-item"><strong>${esc(b.ref)}</strong> ${esc(b.title)} &middot; to ${esc(b.audience)}<div class="when">${esc(b.issued_at)}</div></div>`).join("")
       : '<div class="empty">None</div>'}
     </div>
+    ${attachmentsPanel("car", r.attachments || [])}
     <div class="panel"><h3>History</h3>${historyHtml(r.history)}</div>`;
 
+  wireAttachments("car", id, () => carDetail(id));
   document.getElementById("back").onclick = () => navigate("cars");
   const goEscape = document.getElementById("goto-escape");
   if (goEscape) goEscape.onclick = () => { navigate("escapes"); escapeDetail(r.escape_id); };
@@ -580,6 +650,7 @@ views.capas = async function () {
         ${["Open", "RCCA In Progress", "Actions In Progress", "Effectiveness Verification", "Closed"]
           .map(s => `<option>${s}</option>`).join("")}
       </select>
+      ${me && me.role !== "supplier" ? '<button class="secondary" id="export">Export CSV</button>' : ""}
       ${canWrite() ? '<button class="primary" id="new">+ New CAPA</button>' : ""}
     </div>
     <div id="list"></div>`;
@@ -606,6 +677,12 @@ views.capas = async function () {
     render(await api(`/api/capas?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`));
   };
   ["q", "f-status"].forEach(id => document.getElementById(id).addEventListener("input", refilter));
+  const export_capas = document.getElementById("export");
+  if (export_capas) export_capas.onclick = () => {
+    const status = document.getElementById("f-status").value;
+    const q = document.getElementById("q").value;
+    window.location = `/api/export/capas?status=${encodeURIComponent(status)}&q=${encodeURIComponent(q)}`;
+  };
   const newCapa = document.getElementById("new");
   if (newCapa) newCapa.onclick = () => capaForm();
 };
@@ -704,8 +781,10 @@ async function capaDetail(id) {
       </div>
       <div id="sug"></div>
     </div>
+    ${attachmentsPanel("capa", r.attachments || [])}
     <div class="panel"><h3>History</h3>${historyHtml(r.history)}</div>`;
 
+  wireAttachments("capa", id, () => capaDetail(id));
   document.getElementById("back").onclick = () => navigate("capas");
   const goCar = document.getElementById("goto-car");
   if (goCar) goCar.onclick = () => { navigate("cars"); carDetail(r.car_id); };

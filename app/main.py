@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analytics, auth
+from . import analytics, attachments, auth
 from . import database as db
 from . import models as m
 from . import rating, recommendations
@@ -268,6 +268,7 @@ def get_escape(escape_id: int, user: dict = Depends(auth.forbid_supplier)) -> di
         rec["notifications"] = _rows(conn.execute(
             "SELECT * FROM notifications WHERE record_type='escape' AND record_id=? ORDER BY id DESC",
             (escape_id,)))
+        rec["attachments"] = _attachments_for(conn, "escape", escape_id)
         return rec
 
 
@@ -397,6 +398,7 @@ def get_car(car_id: int, user: dict = Depends(auth.current_user)) -> dict:
             "SELECT id, ref, title, audience, issued_at FROM bulletins WHERE car_id = ?", (car_id,)))
         rec["history"] = _rows(conn.execute(
             "SELECT * FROM history WHERE record_type='car' AND record_id=? ORDER BY id DESC", (car_id,)))
+        rec["attachments"] = _attachments_for(conn, "car", car_id)
         return rec
 
 
@@ -570,6 +572,7 @@ def get_capa(capa_id: int, user: dict = Depends(auth.forbid_supplier)) -> dict:
         rec["verified_by_name"] = _owner_name(conn, rec.get("verified_by"))
         rec["history"] = _rows(conn.execute(
             "SELECT * FROM history WHERE record_type='capa' AND record_id=? ORDER BY id DESC", (capa_id,)))
+        rec["attachments"] = _attachments_for(conn, "capa", capa_id)
         return rec
 
 
@@ -681,6 +684,106 @@ def create_bulletin(body: m.BulletinIn, user: dict = Depends(auth.require_writer
         db.send_notification(conn, "bulletin", cur.lastrowid, body.audience,
                              f"Quality alert {ref}: {body.title}")
         return _row(conn.execute("SELECT * FROM bulletins WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+
+# ------------------------------------------------------------- attachments
+
+_ATTACH_TABLES = {"escape": "escapes", "car": "cars", "capa": "capas"}
+
+
+def _attachment_record(conn, user: dict, record_type: str, record_id: int) -> dict:
+    """Resolve the parent record and enforce visibility: suppliers only reach
+    attachments on their own CARs; other record types are internal-only."""
+    table = _ATTACH_TABLES.get(record_type)
+    if table is None:
+        raise HTTPException(status_code=404, detail="unknown record type")
+    rec = _row(_get_or_404(conn, table, record_id))
+    if record_type == "car":
+        _supplier_guard(user, rec)
+    elif user["role"] == "supplier":
+        raise HTTPException(status_code=403, detail="supplier accounts are limited to their own CARs")
+    return rec
+
+
+def _attachments_for(conn, record_type: str, record_id: int) -> list[dict]:
+    return _rows(conn.execute(
+        """SELECT a.*, COALESCE(u.name, '') AS uploaded_by_name
+           FROM attachments a LEFT JOIN users u ON u.id = a.uploaded_by
+           WHERE a.record_type = ? AND a.record_id = ? ORDER BY a.id DESC""",
+        (record_type, record_id)))
+
+
+@app.post("/api/attachments/{record_type}/{record_id}", status_code=201)
+async def upload_attachment(record_type: str, record_id: int, file: UploadFile,
+                            user: dict = Depends(auth.current_user)) -> dict:
+    """Attach evidence to a record. Writers on anything; suppliers on their
+    own CARs; viewers cannot upload."""
+    if user["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="viewers cannot upload attachments")
+    with db.get_conn() as conn:
+        rec = _attachment_record(conn, user, record_type, record_id)
+        saved = await attachments.store(conn, record_type, record_id, file, user["id"])
+        db.log_history(conn, record_type, record_id, "attachment-added",
+                       f"{saved['filename']} ({saved['size_bytes']} bytes)", user["name"])
+        return saved
+
+
+@app.get("/api/attachments/{attachment_id}/download")
+def download_attachment(attachment_id: int,
+                        user: dict = Depends(auth.current_user)) -> FileResponse:
+    with db.get_conn() as conn:
+        att = _row(_get_or_404(conn, "attachments", attachment_id))
+        _attachment_record(conn, user, att["record_type"], att["record_id"])
+    path = attachments.file_path(att)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=410, detail="stored file is missing")
+    return FileResponse(path, filename=att["filename"],
+                        media_type=att["content_type"] or "application/octet-stream")
+
+
+@app.delete("/api/attachments/{attachment_id}")
+def delete_attachment(attachment_id: int,
+                      user: dict = Depends(auth.require_writer)) -> dict:
+    with db.get_conn() as conn:
+        att = _row(_get_or_404(conn, "attachments", attachment_id))
+        attachments.delete(conn, att)
+        db.log_history(conn, att["record_type"], att["record_id"], "attachment-removed",
+                       att["filename"], user["name"])
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------- exports
+
+EXPORT_TABLES = {"escapes": "escapes", "cars": "cars", "capas": "capas"}
+
+
+@app.get("/api/export/{entity}")
+def export_csv(entity: str, status: str = "", q: str = "",
+               user: dict = Depends(auth.forbid_supplier)) -> Response:
+    """Download the (optionally filtered) records of one entity as CSV,
+    with owner names resolved — Excel-ready."""
+    table = EXPORT_TABLES.get(entity)
+    if table is None:
+        raise HTTPException(status_code=404, detail="unknown entity")
+    with db.get_conn() as conn:
+        sql = f"SELECT * FROM {table} WHERE 1=1"
+        params: list = []
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        if q:
+            sql += " AND (title LIKE ? OR description LIKE ? OR ref LIKE ?)"
+            params.extend([f"%{q}%"] * 3)
+        sql += " ORDER BY id"
+        rows = [_with_meta(conn, r) for r in _rows(conn.execute(sql, params))]
+    buf = io.StringIO()
+    if rows:
+        writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    return Response(
+        content=buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{entity}-{date.today().isoformat()}.csv"'})
 
 
 # ------------------------------------------------- automated escalation run
