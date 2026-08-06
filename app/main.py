@@ -21,6 +21,7 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import analytics
 from . import database as db
 from . import models as m
 from . import rating, recommendations
@@ -100,6 +101,12 @@ def dashboard() -> dict:
         out["recent_history"] = _rows(conn.execute(
             "SELECT * FROM history ORDER BY id DESC LIMIT 12"))
         return out
+
+
+@app.get("/api/analytics")
+def get_analytics() -> dict:
+    with db.get_conn() as conn:
+        return analytics.compute(conn)
 
 
 # -------------------------------------------------------------------- users

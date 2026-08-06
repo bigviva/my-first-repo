@@ -774,6 +774,203 @@ async function capaDetail(id) {
   };
 }
 
+/* ------------------------------------------------------------- analytics */
+
+const VIZ = {
+  c1: "#2a78d6", c2: "#eb6834", c3: "#1baf7a",
+  grid: "#e1e0d9", axis: "#c3c2b7", muted: "#898781", ink: "#1c2733",
+};
+
+function vizTooltipEl() {
+  let el = document.querySelector(".viz-tooltip");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "viz-tooltip";
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+function attachVizHover(container) {
+  const tip = vizTooltipEl();
+  container.querySelectorAll("[data-tip]").forEach(t => {
+    t.addEventListener("mousemove", e => {
+      tip.textContent = t.dataset.tip;
+      tip.style.display = "block";
+      tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 180) + "px";
+      tip.style.top = (e.clientY - 34) + "px";
+    });
+    t.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+  });
+}
+
+// Rounded-top bar path (4px data-end radius, flat baseline).
+function barPath(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h);
+  if (h <= 0) return "";
+  return `M${x},${y + h} v${-(h - r)} a${r},${r} 0 0 1 ${r},${-r} h${w - 2 * r} ` +
+         `a${r},${r} 0 0 1 ${r},${r} v${h - r} z`;
+}
+
+function gridLines(maxV, x0, x1, yScale, y0) {
+  const step = maxV <= 5 ? 1 : Math.ceil(maxV / 4);
+  let out = "";
+  for (let v = step; v <= maxV; v += step) {
+    const y = y0 - v * yScale;
+    out += `<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${VIZ.grid}" stroke-width="1"/>` +
+           `<text x="${x0 - 6}" y="${y + 3}" text-anchor="end" font-size="10" fill="${VIZ.muted}">${v}</text>`;
+  }
+  return out;
+}
+
+// Vertical bar chart, single series.
+function vBarChart(labels, values, { color = VIZ.c1, tipFmt = (l, v) => `${l}: ${v}`, W = 360 } = {}) {
+  const H = 200, padL = 30, padB = 26, padT = 10;
+  const y0 = H - padB;
+  const maxV = Math.max(1, ...values);
+  const yScale = (y0 - padT) / maxV;
+  const n = labels.length || 1;
+  const slot = (W - padL - 8) / n;
+  const bw = Math.min(48, slot - 8);
+  let bars = "", xlabels = "";
+  labels.forEach((l, i) => {
+    const x = padL + 8 + i * slot + (slot - bw) / 2;
+    const h = values[i] * yScale;
+    bars += `<path d="${barPath(x, y0 - h, bw, h, 4)}" fill="${color}" data-tip="${esc(tipFmt(l, values[i]))}"/>`;
+    const short = String(l).length > 9 ? String(l).slice(0, 8) + "…" : l;
+    xlabels += `<text x="${x + bw / 2}" y="${y0 + 14}" text-anchor="middle" font-size="10" fill="${VIZ.muted}">${esc(short)}</text>`;
+  });
+  return `<div class="chart-wrap"><svg viewBox="0 0 ${W} ${H}" role="img">
+    ${gridLines(maxV, padL, W - 4, yScale, y0)}
+    <line x1="${padL}" y1="${y0}" x2="${W - 4}" y2="${y0}" stroke="${VIZ.axis}" stroke-width="1"/>
+    ${bars}${xlabels}</svg></div>`;
+}
+
+// Horizontal bar chart (top-N lists).
+function hBarChart(items, { color = VIZ.c1, tipFmt = (l, v) => `${l}: ${v}`, W = 360 } = {}) {
+  if (!items.length) return '<div class="empty">No data yet</div>';
+  const rowH = 30, padL = 110, padT = 4;
+  const H = padT + items.length * rowH + 4;
+  const maxV = Math.max(1, ...items.map(d => d.count));
+  const scale = (W - padL - 46) / maxV;
+  let rows = "";
+  items.forEach((d, i) => {
+    const y = padT + i * rowH + 5;
+    const w = Math.max(2, d.count * scale);
+    const label = d.label.length > 18 ? d.label.slice(0, 17) + "…" : d.label;
+    rows += `<text x="${padL - 8}" y="${y + 13}" text-anchor="end" font-size="11" fill="${VIZ.ink}">${esc(label)}</text>` +
+      `<path d="M${padL},${y} h${w - 4} a4,4 0 0 1 4,4 v${rowH - 18} a4,4 0 0 1 -4,4 h${-(w - 4)} z" fill="${color}" data-tip="${esc(tipFmt(d.label, d.count))}"/>` +
+      `<text x="${padL + w + 6}" y="${y + 13}" font-size="11" fill="${VIZ.muted}">${d.count}</text>`;
+  });
+  return `<div class="chart-wrap"><svg viewBox="0 0 ${W} ${H}" role="img">${rows}</svg></div>`;
+}
+
+// Two-series line chart over months with column hover.
+function lineChart(months, seriesA, seriesB, nameA, nameB) {
+  const W = 720, H = 220, padL = 30, padB = 24, padT = 10;
+  const y0 = H - padB;
+  const maxV = Math.max(1, ...seriesA, ...seriesB);
+  const yScale = (y0 - padT) / maxV;
+  const n = months.length;
+  const xStep = (W - padL - 16) / Math.max(1, n - 1);
+  const x = i => padL + 8 + i * xStep;
+  const y = v => y0 - v * yScale;
+  const pts = s => s.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+  const dots = (s, color) => s.map((v, i) =>
+    `<circle cx="${x(i)}" cy="${y(v)}" r="3" fill="${color}"/>`).join("");
+  let hover = "", xlabels = "";
+  const monthName = m => new Date(m + "-15").toLocaleString("en", { month: "short" });
+  months.forEach((m, i) => {
+    hover += `<rect x="${x(i) - xStep / 2}" y="${padT}" width="${xStep}" height="${y0 - padT}" fill="transparent" data-tip="${esc(`${monthName(m)} ${m.slice(0, 4)} — ${nameA} ${seriesA[i]}, ${nameB} ${seriesB[i]}`)}"/>`;
+    if (i % 2 === 0 || n <= 6)
+      xlabels += `<text x="${x(i)}" y="${y0 + 14}" text-anchor="middle" font-size="10" fill="${VIZ.muted}">${monthName(m)}</text>`;
+  });
+  return `
+    <div class="viz-legend">
+      <span class="key"><span class="swatch" style="background:${VIZ.c1}"></span>${esc(nameA)}</span>
+      <span class="key"><span class="swatch" style="background:${VIZ.c2}"></span>${esc(nameB)}</span>
+    </div>
+    <div class="chart-wrap"><svg viewBox="0 0 ${W} ${H}" role="img">
+      ${gridLines(maxV, padL, W - 4, yScale, y0)}
+      <line x1="${padL}" y1="${y0}" x2="${W - 4}" y2="${y0}" stroke="${VIZ.axis}" stroke-width="1"/>
+      <polyline points="${pts(seriesA)}" fill="none" stroke="${VIZ.c1}" stroke-width="2"/>
+      <polyline points="${pts(seriesB)}" fill="none" stroke="${VIZ.c2}" stroke-width="2"/>
+      ${dots(seriesA, VIZ.c1)}${dots(seriesB, VIZ.c2)}
+      ${hover}${xlabels}</svg></div>`;
+}
+
+// Grouped bars: aging buckets x 3 record types. Aqua is low-contrast on white,
+// so every bar carries a visible value label (the palette's relief rule).
+function agingChart(a) {
+  const series = [
+    { name: "Escapes", vals: a.escapes, color: VIZ.c1 },
+    { name: "CARs", vals: a.cars, color: VIZ.c2 },
+    { name: "CAPAs", vals: a.capas, color: VIZ.c3 },
+  ];
+  const W = 720, H = 210, padL = 30, padB = 26, padT = 16;
+  const y0 = H - padB;
+  const maxV = Math.max(1, ...series.flatMap(s => s.vals));
+  const yScale = (y0 - padT) / maxV;
+  const groupW = (W - padL - 16) / a.buckets.length;
+  const bw = Math.min(34, (groupW - 24) / 3);
+  let bars = "", xlabels = "";
+  a.buckets.forEach((b, gi) => {
+    const gx = padL + 8 + gi * groupW + (groupW - bw * 3 - 4) / 2;
+    series.forEach((s, si) => {
+      const v = s.vals[gi];
+      const h = v * yScale;
+      const x = gx + si * (bw + 2);
+      if (h > 0) bars += `<path d="${barPath(x, y0 - h, bw, h, 4)}" fill="${s.color}" data-tip="${esc(`${s.name} open ${b} days: ${v}`)}"/>`;
+      bars += `<text x="${x + bw / 2}" y="${y0 - h - 4}" text-anchor="middle" font-size="10" fill="${VIZ.ink}">${v}</text>`;
+    });
+    xlabels += `<text x="${gx + bw * 1.5}" y="${y0 + 15}" text-anchor="middle" font-size="10" fill="${VIZ.muted}">${b} days</text>`;
+  });
+  return `
+    <div class="viz-legend">${series.map(s =>
+      `<span class="key"><span class="swatch" style="background:${s.color}"></span>${s.name}</span>`).join("")}
+    </div>
+    <div class="chart-wrap"><svg viewBox="0 0 ${W} ${H}" role="img">
+      ${gridLines(maxV, padL, W - 4, yScale, y0)}
+      <line x1="${padL}" y1="${y0}" x2="${W - 4}" y2="${y0}" stroke="${VIZ.axis}" stroke-width="1"/>
+      ${bars}${xlabels}</svg></div>`;
+}
+
+views.analytics = async function () {
+  const a = await api("/api/analytics");
+  const ct = a.cycle_time_days;
+  const tile = (num, label, note) => `
+    <div class="card"><div class="num">${num}</div><div class="label">${label}</div>
+    ${note ? `<div class="stat-note">${note}</div>` : ""}</div>`;
+  $main.innerHTML = `
+    <div class="cards">
+      ${tile(ct.escapes ?? "—", "Avg days to close escape")}
+      ${tile(ct.cars ?? "—", "Avg days to close CAR")}
+      ${tile(ct.capas ?? "—", "Avg days to close CAPA")}
+      ${tile(a.car_first_pass_acceptance !== null ? a.car_first_pass_acceptance + "%" : "—",
+             "CAR first-pass acceptance", "responses accepted without a rejection round")}
+      ${tile(a.capa_effectiveness_rate !== null ? a.capa_effectiveness_rate + "%" : "—",
+             "CAPA effectiveness", "of verified CAPAs confirmed effective")}
+    </div>
+    <div class="chart-grid">
+      <div class="panel wide"><h3>Created vs closed — all concern records, last 12 months</h3>
+        ${lineChart(a.months, a.monthly_created, a.monthly_closed, "Created", "Closed")}</div>
+      <div class="panel wide"><h3>Open record aging</h3>${agingChart(a.aging)}</div>
+      <div class="panel"><h3>Escapes by customer</h3>
+        ${hBarChart(a.escapes_by_customer, { tipFmt: (l, v) => `${l}: ${v} escape(s)` })}</div>
+      <div class="panel"><h3>CARs by supplier</h3>
+        ${hBarChart(a.cars_by_supplier, { color: VIZ.c1, tipFmt: (l, v) => `${l}: ${v} CAR(s)` })}</div>
+      <div class="panel"><h3>Root cause Pareto (CAPAs)</h3>
+        ${a.root_cause_pareto.length
+          ? vBarChart(a.root_cause_pareto.map(d => d.label), a.root_cause_pareto.map(d => d.count),
+                      { tipFmt: (l, v) => `${l}: ${v} CAPA(s)` })
+          : '<div class="empty">No categorized CAPAs yet</div>'}</div>
+      <div class="panel"><h3>Open records by escalation level</h3>
+        ${vBarChart(a.escalation_distribution.labels, a.escalation_distribution.counts,
+                    { tipFmt: (l, v) => `${l}: ${v} open record(s)` })}</div>
+    </div>`;
+  attachVizHover($main);
+};
+
 /* ------------------------------------------------------------- bulletins */
 
 views.bulletins = async function () {

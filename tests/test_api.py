@@ -247,3 +247,31 @@ def test_dashboard(client, user):
     assert d["escapes"]["escalated"] == 1
     assert d["cars"]["open"] == 1
     assert d["recent_history"]
+
+
+def test_analytics(client, user):
+    esc = client.post("/api/escapes", json={
+        "title": "Analytics escape", "escape_type": "external", "customer": "ACME",
+        "severity": 4, "likelihood": 3, "containment_plan": "done"}).json()
+    client.post(f"/api/escapes/{esc['id']}/status", json={"status": "Closed"})
+    car = client.post("/api/cars", json={
+        "title": "Analytics CAR", "car_type": "external", "supplier": "WeldCo"}).json()
+    client.post(f"/api/cars/{car['id']}/validate", json={"approved": True})
+    client.post(f"/api/cars/{car['id']}/issue")
+    client.post(f"/api/cars/{car['id']}/respond", json={"response_text": "fixed"})
+    client.post(f"/api/cars/{car['id']}/decision", json={"accept": True})
+    capa = client.post("/api/capas", json={
+        "title": "Analytics CAPA", "root_cause_category": "Process"}).json()
+
+    a = client.get("/api/analytics").json()
+    assert len(a["months"]) == 12
+    assert sum(a["monthly_created"]) == 3
+    assert sum(a["monthly_closed"]) == 1
+    assert a["cycle_time_days"]["escapes"] is not None
+    assert a["aging"]["buckets"] == ["0-30", "31-60", "61-90", "90+"]
+    assert a["aging"]["cars"][0] == 1          # open CAR created just now
+    assert a["escapes_by_customer"][0]["label"] == "ACME"
+    assert a["cars_by_supplier"][0]["label"] == "WeldCo"
+    assert a["root_cause_pareto"][0]["label"] == "Process"
+    assert a["car_first_pass_acceptance"] == 100
+    assert a["escalation_distribution"]["labels"] == ["None", "Level 1", "Level 2", "Executive"]

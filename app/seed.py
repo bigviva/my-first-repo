@@ -25,23 +25,26 @@ def seed() -> None:
 
         escapes = [
             ("Cracked bracket shipped to customer", "Customer reported hairline crack in mounting bracket on delivered unit.",
-             "external", "Northrop", "Falcon", "BRK-2231", 4, 2, "Quarantined remaining lot, 100% visual inspection added.", "2026-07-15", "Closed"),
+             "external", "Northrop", "Falcon", "BRK-2231", 4, 2, "Quarantined remaining lot, 100% visual inspection added.", "2026-07-15", "Closed",
+             "2026-06-10 09:00:00", "2026-07-20 10:00:00"),
             ("Wrong torque spec applied on line 3", "Operators used superseded torque spec from outdated work instruction.",
-             "internal", "", "Atlas", "ASM-1102", 3, 3, "Line stopped, affected units re-torqued and verified.", "2026-08-20", "In Progress"),
+             "internal", "", "Atlas", "ASM-1102", 3, 3, "Line stopped, affected units re-torqued and verified.", "2026-08-20", "In Progress",
+             "2026-07-05 08:30:00", None),
             ("Unsealed connector found at receiving inspection", "Supplier shipped connectors without conformal seal.",
-             "external", "Raytheon", "Sentinel", "CON-8804", 2, 2, "", "2026-08-30", "Open"),
+             "external", "Raytheon", "Sentinel", "CON-8804", 2, 2, "", "2026-08-30", "Open",
+             "2026-08-01 13:00:00", None),
         ]
-        for title, desc, etype, cust, prog, pn, sev, lik, plan, due, status in escapes:
+        for title, desc, etype, cust, prog, pn, sev, lik, plan, due, status, created, closed in escapes:
             score, level = rating.rate(sev, lik)
             ref = db.next_ref(conn, "escapes", "ESC")
             cur = conn.execute(
                 """INSERT INTO escapes (ref, title, description, escape_type, customer, program,
                        part_number, severity, likelihood, rating_score, escalation_level,
                        containment_plan, due_date, status, owner_id,
-                       closed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       created_at, closed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ref, title, desc, etype, cust, prog, pn, sev, lik, score, level,
-                 plan, due, status, 1, "2026-07-20 10:00:00" if status == "Closed" else None))
+                 plan, due, status, 1, created, closed))
             db.log_history(conn, "escape", cur.lastrowid, "created", f"{ref}: {title} (seed)")
 
         cars = [
@@ -54,17 +57,21 @@ def seed() -> None:
             ("Connector sealing nonconformance", "Supplier skipped conformal seal operation on lot 44B.",
              "external", "ConnectPro", 3, 3, "2026-09-01", "Draft", "", ""),
         ]
+        car_created = {"Closed": "2026-06-15 10:00:00", "Issued": "2026-07-10 11:00:00",
+                       "Draft": "2026-08-03 15:00:00"}
         for title, desc, ctype, supplier, escape_id, sev, due, status, resp, decision in cars:
             ref = db.next_ref(conn, "cars", "CAR")
             cur = conn.execute(
                 """INSERT INTO cars (ref, title, description, car_type, supplier, escape_id,
                        severity, due_date, status, response_text, response_decision_notes,
-                       validated_by, validated_at, response_submitted_at, closed_at, owner_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       validated_by, validated_at, response_submitted_at, created_at,
+                       closed_at, owner_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ref, title, desc, ctype, supplier, escape_id, sev, due, status, resp, decision,
                  2 if status != "Draft" else None,
                  "2026-07-01 09:00:00" if status != "Draft" else None,
                  "2026-07-10 14:00:00" if resp else None,
+                 car_created.get(status, "2026-08-01 09:00:00"),
                  "2026-07-25 16:00:00" if status == "Closed" else None, 2))
             db.log_history(conn, "car", cur.lastrowid, "created", f"{ref}: {title} (seed)")
 
@@ -87,11 +94,12 @@ def seed() -> None:
                 """INSERT INTO capas (ref, title, description, car_id, rcca_method,
                        root_cause_category, root_cause, corrective_action, preventive_action,
                        due_date, status, effective, effectiveness_result, verified_by,
-                       verified_at, closed_at, owner_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       verified_at, created_at, closed_at, owner_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (ref, title, desc, car_id, method, cat, rc, ca, pa, due, status,
                  effective, result, verifier,
                  "2026-08-05 11:00:00" if effective is not None else None,
+                 "2026-06-20 09:00:00" if status == "Closed" else "2026-07-15 09:00:00",
                  "2026-08-05 11:00:00" if status == "Closed" else None, owner))
             db.log_history(conn, "capa", cur.lastrowid, "created", f"{ref}: {title} (seed)")
 

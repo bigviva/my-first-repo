@@ -35,6 +35,10 @@ an audit trail, and built-in recommendations from historical data.
 - Full record linkage: Escape → CAR → CAPA, plus bulletins per CAR
 - Immutable history log on every record
 - Dashboard with open/closed/overdue/escalated counts and CAPA effectiveness rate
+- Analytics: 12-month created-vs-closed trend, average cycle times, open-record
+  aging buckets, escapes by customer, CARs by supplier, root cause Pareto,
+  escalation distribution, CAR first-pass acceptance rate (`/api/analytics`,
+  rendered as dependency-free SVG charts on the Analytics tab)
 - CSV import to migrate existing spreadsheet data (Escapes, CARs, CAPAs)
 
 ## Running it
