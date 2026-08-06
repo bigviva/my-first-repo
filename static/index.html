@@ -11,8 +11,11 @@
   <header>
     <h1>Corrective Actions Tracking</h1>
     <span class="sub">Escapes &middot; CARs &middot; CAPA</span>
+    <span class="header-spacer"></span>
+    <span id="whoami"></span>
+    <button id="logout" hidden>Sign out</button>
   </header>
-  <nav id="nav">
+  <nav id="nav" hidden>
     <button data-view="dashboard" class="active">Dashboard</button>
     <button data-view="analytics">Analytics</button>
     <button data-view="escapes">Escapes</button>
@@ -20,6 +23,7 @@
     <button data-view="capas">CAPA</button>
     <button data-view="bulletins">Bulletins</button>
     <button data-view="import">Import</button>
+    <button data-view="users">Users</button>
   </nav>
   <main id="main"></main>
   <script src="/static/app.js"></script>

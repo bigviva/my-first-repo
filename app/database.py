@@ -11,7 +11,19 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
-    department TEXT NOT NULL DEFAULT ''
+    department TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'quality'
+        CHECK (role IN ('admin', 'quality', 'viewer', 'supplier')),
+    password_hash TEXT NOT NULL DEFAULT '',
+    supplier_name TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS escapes (
@@ -127,11 +139,31 @@ CREATE INDEX IF NOT EXISTS idx_notifications_record ON notifications(record_type
 """
 
 
+# Columns added after the initial release; applied to pre-existing databases.
+_MIGRATIONS = {
+    "users": [
+        ("role", "TEXT NOT NULL DEFAULT 'quality'"),
+        ("password_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("supplier_name", "TEXT NOT NULL DEFAULT ''"),
+        ("active", "INTEGER NOT NULL DEFAULT 1"),
+    ],
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, columns in _MIGRATIONS.items():
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 def init_db(path: Optional[str] = None) -> None:
     target = path or DB_PATH
     os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
     with sqlite3.connect(target) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
 
 
 @contextmanager
@@ -162,8 +194,11 @@ def log_history(conn: sqlite3.Connection, record_type: str, record_id: int,
 
 def send_notification(conn: sqlite3.Connection, record_type: str, record_id: int,
                       recipient: str, message: str) -> None:
-    """Record an outbound notification. Integration with email/Teams can hook in here."""
+    """Record an outbound notification, and deliver by email when SMTP is
+    configured (best-effort; the database log is the source of truth)."""
     conn.execute(
         "INSERT INTO notifications (record_type, record_id, recipient, message) VALUES (?, ?, ?, ?)",
         (record_type, record_id, recipient, message),
     )
+    from . import notify
+    notify.send_email(conn, recipient, f"[Corrective Actions] {record_type} update", message)

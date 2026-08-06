@@ -9,6 +9,7 @@ Covers the Concern Module scope:
 - Processing of CAPA (RCCA capture, historically-effective RCCA assist,
   effectiveness verification, assignment suggestions, tracking to closure)
 """
+import asyncio
 import csv
 import io
 import os
@@ -17,11 +18,11 @@ from contextlib import asynccontextmanager
 from datetime import date
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analytics
+from . import analytics, auth
 from . import database as db
 from . import models as m
 from . import rating, recommendations
@@ -29,10 +30,28 @@ from . import rating, recommendations
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
 
 
+async def _escalation_loop() -> None:
+    """Nightly automated escalation sweep (set ESCALATION_INTERVAL_HOURS=0 to disable)."""
+    interval = float(os.environ.get("ESCALATION_INTERVAL_HOURS", "24"))
+    if interval <= 0:
+        return
+    while True:
+        await asyncio.sleep(interval * 3600)
+        try:
+            result = _run_escalation_sweep()
+            if result["count"]:
+                print(f"[escalation] escalated {result['count']} overdue record(s)")
+        except Exception as exc:  # keep the loop alive across transient failures
+            print(f"[escalation] sweep failed: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     db.init_db()
+    auth.bootstrap_admin()
+    task = asyncio.create_task(_escalation_loop())
     yield
+    task.cancel()
 
 
 app = FastAPI(title="Corrective Actions Tracking System", version="1.0.0", lifespan=lifespan)
@@ -71,10 +90,56 @@ def _with_meta(conn, record: dict) -> dict:
     return record
 
 
+# --------------------------------------------------------------------- auth
+
+def _public_user(u: dict) -> dict:
+    return {k: v for k, v in u.items() if k != "password_hash"}
+
+
+@app.post("/api/auth/login")
+def login(body: m.LoginIn, response: Response) -> dict:
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE email = ? AND active = 1", (body.email,)).fetchone()
+        if row is None or not auth.verify_password(body.password, row["password_hash"]):
+            raise HTTPException(status_code=401, detail="invalid email or password")
+        token = auth.create_session(conn, row["id"])
+    response.set_cookie(
+        auth.SESSION_COOKIE, token, httponly=True, samesite="lax",
+        max_age=auth.SESSION_TTL_HOURS * 3600)
+    return _public_user(dict(row))
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response, user: dict = Depends(auth.current_user),
+           cat_session: Optional[str] = None) -> dict:
+    with db.get_conn() as conn:
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
+    response.delete_cookie(auth.SESSION_COOKIE)
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def me(user: dict = Depends(auth.current_user)) -> dict:
+    return _public_user(user)
+
+
+@app.post("/api/auth/password")
+def change_password(body: m.PasswordChange, user: dict = Depends(auth.current_user)) -> dict:
+    with db.get_conn() as conn:
+        row = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user["id"],)).fetchone()
+        if not auth.verify_password(body.current_password, row["password_hash"]):
+            raise HTTPException(status_code=403, detail="current password is incorrect")
+        conn.execute("UPDATE users SET password_hash = ? WHERE id = ?",
+                     (auth.hash_password(body.new_password), user["id"]))
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
+    return {"ok": True, "detail": "password changed; sign in again"}
+
+
 # ---------------------------------------------------------------- dashboard
 
 @app.get("/api/dashboard")
-def dashboard() -> dict:
+def dashboard(user: dict = Depends(auth.forbid_supplier)) -> dict:
     with db.get_conn() as conn:
         out: dict = {}
         for table, key in (("escapes", "escapes"), ("cars", "cars"), ("capas", "capas")):
@@ -104,7 +169,7 @@ def dashboard() -> dict:
 
 
 @app.get("/api/analytics")
-def get_analytics() -> dict:
+def get_analytics(user: dict = Depends(auth.forbid_supplier)) -> dict:
     with db.get_conn() as conn:
         return analytics.compute(conn)
 
@@ -112,21 +177,44 @@ def get_analytics() -> dict:
 # -------------------------------------------------------------------- users
 
 @app.get("/api/users")
-def list_users() -> list[dict]:
+def list_users(user: dict = Depends(auth.forbid_supplier)) -> list[dict]:
     with db.get_conn() as conn:
-        return _rows(conn.execute("SELECT * FROM users ORDER BY name"))
+        return [_public_user(u) for u in _rows(conn.execute("SELECT * FROM users ORDER BY name"))]
 
 
 @app.post("/api/users", status_code=201)
-def create_user(body: m.UserIn) -> dict:
+def create_user(body: m.UserIn, admin: dict = Depends(auth.require_admin)) -> dict:
     with db.get_conn() as conn:
         try:
             cur = conn.execute(
-                "INSERT INTO users (name, email, department) VALUES (?, ?, ?)",
-                (body.name, body.email, body.department))
+                """INSERT INTO users (name, email, department, role, password_hash, supplier_name)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (body.name, body.email, body.department, body.role,
+                 auth.hash_password(body.password) if body.password else "",
+                 body.supplier_name))
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=409, detail="email already exists")
-        return _row(conn.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone())
+        return _public_user(_row(conn.execute(
+            "SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone()))
+
+
+@app.patch("/api/users/{user_id}")
+def update_user(user_id: int, body: m.UserAdminUpdate,
+                admin: dict = Depends(auth.require_admin)) -> dict:
+    with db.get_conn() as conn:
+        _get_or_404(conn, "users", user_id)
+        changes = {k: v for k, v in body.model_dump().items() if v is not None}
+        if "password" in changes:
+            changes["password_hash"] = auth.hash_password(changes.pop("password"))
+        if "active" in changes:
+            changes["active"] = 1 if changes["active"] else 0
+        if changes:
+            sets = ", ".join(f"{k} = ?" for k in changes)
+            conn.execute(f"UPDATE users SET {sets} WHERE id = ?", (*changes.values(), user_id))
+            if changes.get("active") == 0:
+                conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        return _public_user(_row(conn.execute(
+            "SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()))
 
 
 # ------------------------------------------------------------------ escapes
@@ -141,7 +229,8 @@ ESCAPE_TRANSITIONS = {
 
 
 @app.get("/api/escapes")
-def list_escapes(status: str = "", escape_type: str = "", q: str = "") -> list[dict]:
+def list_escapes(status: str = "", escape_type: str = "", q: str = "",
+                 user: dict = Depends(auth.forbid_supplier)) -> list[dict]:
     with db.get_conn() as conn:
         sql = "SELECT * FROM escapes WHERE 1=1"
         params: list = []
@@ -159,7 +248,7 @@ def list_escapes(status: str = "", escape_type: str = "", q: str = "") -> list[d
 
 
 @app.get("/api/escapes/{escape_id}")
-def get_escape(escape_id: int) -> dict:
+def get_escape(escape_id: int, user: dict = Depends(auth.forbid_supplier)) -> dict:
     with db.get_conn() as conn:
         rec = _with_meta(conn, _row(_get_or_404(conn, "escapes", escape_id)))
         rec["severity_label"] = rating.SEVERITY_LABELS[rec["severity"]]
@@ -176,7 +265,7 @@ def get_escape(escape_id: int) -> dict:
 
 
 @app.post("/api/escapes", status_code=201)
-def create_escape(body: m.EscapeIn) -> dict:
+def create_escape(body: m.EscapeIn, user: dict = Depends(auth.require_writer)) -> dict:
     with db.get_conn() as conn:
         score, level = rating.rate(body.severity, body.likelihood)
         ref = db.next_ref(conn, "escapes", "ESC")
@@ -188,7 +277,8 @@ def create_escape(body: m.EscapeIn) -> dict:
             (ref, body.title, body.description, body.escape_type, body.customer, body.program,
              body.part_number, body.severity, body.likelihood, score, level,
              body.containment_plan, body.containment_due, body.due_date, body.owner_id))
-        db.log_history(conn, "escape", cur.lastrowid, "created", f"{ref}: {body.title}")
+        db.log_history(conn, "escape", cur.lastrowid, "created", f"{ref}: {body.title}",
+                       user["name"])
         if level != "None":
             db.send_notification(conn, "escape", cur.lastrowid, "quality-management",
                                  f"{ref} rated {score} ({level} escalation): {body.title}")
@@ -197,7 +287,8 @@ def create_escape(body: m.EscapeIn) -> dict:
 
 
 @app.patch("/api/escapes/{escape_id}")
-def update_escape(escape_id: int, body: m.EscapeUpdate) -> dict:
+def update_escape(escape_id: int, body: m.EscapeUpdate,
+                  user: dict = Depends(auth.require_writer)) -> dict:
     with db.get_conn() as conn:
         rec = _row(_get_or_404(conn, "escapes", escape_id))
         changes = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -209,7 +300,8 @@ def update_escape(escape_id: int, body: m.EscapeUpdate) -> dict:
         sets = ", ".join(f"{k} = ?" for k in changes) + ", updated_at = datetime('now')"
         conn.execute(f"UPDATE escapes SET {sets} WHERE id = ?", (*changes.values(), escape_id))
         db.log_history(conn, "escape", escape_id, "updated",
-                       ", ".join(k for k in changes if k not in ("rating_score", "escalation_level")))
+                       ", ".join(k for k in changes if k not in ("rating_score", "escalation_level")),
+                       user["name"])
         if level != rec["escalation_level"]:
             db.send_notification(conn, "escape", escape_id, "quality-management",
                                  f"{rec['ref']} escalation changed to {level} (score {score})")
@@ -218,7 +310,8 @@ def update_escape(escape_id: int, body: m.EscapeUpdate) -> dict:
 
 
 @app.post("/api/escapes/{escape_id}/status")
-def escape_status(escape_id: int, body: m.StatusChange) -> dict:
+def escape_status(escape_id: int, body: m.StatusChange,
+                  user: dict = Depends(auth.require_writer)) -> dict:
     with db.get_conn() as conn:
         rec = _row(_get_or_404(conn, "escapes", escape_id))
         allowed = ESCAPE_TRANSITIONS.get(rec["status"], set())
@@ -234,27 +327,38 @@ def escape_status(escape_id: int, body: m.StatusChange) -> dict:
             (body.status, escape_id))
         db.log_history(conn, "escape", escape_id, "status",
                        f"{rec['status']} -> {body.status}" + (f" ({body.note})" if body.note else ""),
-                       body.changed_by)
+                       user["name"])
         return _with_meta(conn, _row(conn.execute(
             "SELECT * FROM escapes WHERE id = ?", (escape_id,)).fetchone()))
 
 
 @app.post("/api/escapes/{escape_id}/notify", status_code=201)
-def escape_notify(escape_id: int, body: m.NotificationIn) -> dict:
+def escape_notify(escape_id: int, body: m.NotificationIn,
+                  user: dict = Depends(auth.require_writer)) -> dict:
     with db.get_conn() as conn:
         rec = _row(_get_or_404(conn, "escapes", escape_id))
         db.send_notification(conn, "escape", escape_id, body.recipient, body.message)
-        db.log_history(conn, "escape", escape_id, "notified", f"to {body.recipient}")
+        db.log_history(conn, "escape", escape_id, "notified", f"to {body.recipient}", user["name"])
         return {"ok": True, "ref": rec["ref"]}
 
 
 # --------------------------------------------------------------------- cars
 
+def _supplier_guard(user: dict, rec: dict) -> None:
+    """Suppliers may only touch CARs addressed to their own supplier_name."""
+    if user["role"] == "supplier" and rec.get("supplier") != user["supplier_name"]:
+        raise HTTPException(status_code=403, detail="not your CAR")
+
+
 @app.get("/api/cars")
-def list_cars(status: str = "", car_type: str = "", q: str = "") -> list[dict]:
+def list_cars(status: str = "", car_type: str = "", q: str = "",
+              user: dict = Depends(auth.current_user)) -> list[dict]:
     with db.get_conn() as conn:
         sql = "SELECT * FROM cars WHERE 1=1"
         params: list = []
+        if user["role"] == "supplier":
+            sql += " AND supplier = ?"
+            params.append(user["supplier_name"])
         if status:
             sql += " AND status = ?"
             params.append(status)
@@ -269,9 +373,10 @@ def list_cars(status: str = "", car_type: str = "", q: str = "") -> list[dict]:
 
 
 @app.get("/api/cars/{car_id}")
-def get_car(car_id: int) -> dict:
+def get_car(car_id: int, user: dict = Depends(auth.current_user)) -> dict:
     with db.get_conn() as conn:
         rec = _with_meta(conn, _row(_get_or_404(conn, "cars", car_id)))
+        _supplier_guard(user, rec)
         if rec["escape_id"]:
             esc = conn.execute("SELECT ref, title FROM escapes WHERE id = ?", (rec["escape_id"],)).fetchone()
             rec["escape_ref"] = esc["ref"] if esc else None
@@ -285,7 +390,7 @@ def get_car(car_id: int) -> dict:
 
 
 @app.post("/api/cars", status_code=201)
-def create_car(body: m.CarIn) -> dict:
+def create_car(body: m.CarIn, user: dict = Depends(auth.require_writer)) -> dict:
     with db.get_conn() as conn:
         if body.escape_id is not None:
             _get_or_404(conn, "escapes", body.escape_id)
@@ -296,26 +401,29 @@ def create_car(body: m.CarIn) -> dict:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (ref, body.title, body.description, body.car_type, body.supplier, body.escape_id,
              body.severity, body.due_date, body.owner_id))
-        db.log_history(conn, "car", cur.lastrowid, "created", f"{ref}: {body.title} (draft)")
+        db.log_history(conn, "car", cur.lastrowid, "created", f"{ref}: {body.title} (draft)",
+                       user["name"])
         return _with_meta(conn, _row(conn.execute(
             "SELECT * FROM cars WHERE id = ?", (cur.lastrowid,)).fetchone()))
 
 
 @app.patch("/api/cars/{car_id}")
-def update_car(car_id: int, body: m.CarUpdate) -> dict:
+def update_car(car_id: int, body: m.CarUpdate,
+               user: dict = Depends(auth.require_writer)) -> dict:
     with db.get_conn() as conn:
         rec = _row(_get_or_404(conn, "cars", car_id))
         changes = {k: v for k, v in body.model_dump().items() if v is not None}
         if changes:
             sets = ", ".join(f"{k} = ?" for k in changes) + ", updated_at = datetime('now')"
             conn.execute(f"UPDATE cars SET {sets} WHERE id = ?", (*changes.values(), car_id))
-            db.log_history(conn, "car", car_id, "updated", ", ".join(changes))
+            db.log_history(conn, "car", car_id, "updated", ", ".join(changes), user["name"])
         return _with_meta(conn, _row(conn.execute(
             "SELECT * FROM cars WHERE id = ?", (car_id,)).fetchone()))
 
 
 def _car_transition(conn, car_id: int, from_statuses: set[str], to_status: str,
-                    action: str, detail: str, extra_sql: str = "", extra_params: tuple = ()):
+                    action: str, detail: str, extra_sql: str = "", extra_params: tuple = (),
+                    changed_by: str = "system"):
     rec = _row(_get_or_404(conn, "cars", car_id))
     if rec["status"] not in from_statuses:
         raise HTTPException(
@@ -324,29 +432,32 @@ def _car_transition(conn, car_id: int, from_statuses: set[str], to_status: str,
     conn.execute(
         f"UPDATE cars SET status = ?{extra_sql}, updated_at = datetime('now') WHERE id = ?",
         (to_status, *extra_params, car_id))
-    db.log_history(conn, "car", car_id, action, detail)
+    db.log_history(conn, "car", car_id, action, detail, changed_by)
     return _row(conn.execute("SELECT * FROM cars WHERE id = ?", (car_id,)).fetchone())
 
 
 @app.post("/api/cars/{car_id}/validate")
-def validate_car(car_id: int, body: m.CarValidation) -> dict:
+def validate_car(car_id: int, body: m.CarValidation,
+                 user: dict = Depends(auth.require_writer)) -> dict:
     """Validation of the CAR prior to issuance."""
     with db.get_conn() as conn:
         if not body.approved:
             rec = _row(_get_or_404(conn, "cars", car_id))
-            db.log_history(conn, "car", car_id, "validation-rejected", body.validation_notes)
+            db.log_history(conn, "car", car_id, "validation-rejected", body.validation_notes,
+                           user["name"])
             return _with_meta(conn, rec)
         rec = _car_transition(
             conn, car_id, {"Draft"}, "Validated", "validated", body.validation_notes,
             ", validated_by = ?, validated_at = datetime('now'), validation_notes = ?",
-            (body.validated_by, body.validation_notes))
+            (body.validated_by, body.validation_notes), changed_by=user["name"])
         return _with_meta(conn, rec)
 
 
 @app.post("/api/cars/{car_id}/issue")
-def issue_car(car_id: int) -> dict:
+def issue_car(car_id: int, user: dict = Depends(auth.require_writer)) -> dict:
     with db.get_conn() as conn:
-        rec = _car_transition(conn, car_id, {"Validated"}, "Issued", "issued", "CAR issued")
+        rec = _car_transition(conn, car_id, {"Validated"}, "Issued", "issued", "CAR issued",
+                              changed_by=user["name"])
         recipient = rec["supplier"] or "responsible-party"
         db.send_notification(conn, "car", car_id, recipient,
                              f"{rec['ref']} issued: {rec['title']}. Response due {rec['due_date'] or 'TBD'}.")
@@ -354,25 +465,31 @@ def issue_car(car_id: int) -> dict:
 
 
 @app.post("/api/cars/{car_id}/respond")
-def submit_car_response(car_id: int, body: m.CarResponse) -> dict:
+def submit_car_response(car_id: int, body: m.CarResponse,
+                        user: dict = Depends(auth.current_user)) -> dict:
+    """Response submission — open to writers and to the CAR's own supplier."""
+    if user["role"] not in auth.WRITE_ROLES and user["role"] != "supplier":
+        raise HTTPException(status_code=403, detail="viewers cannot submit responses")
     with db.get_conn() as conn:
+        _supplier_guard(user, _row(_get_or_404(conn, "cars", car_id)))
         rec = _car_transition(
             conn, car_id, {"Issued", "Response Rejected"}, "Response Submitted",
             "response-submitted", body.response_text[:120],
             ", response_text = ?, response_submitted_at = datetime('now')",
-            (body.response_text,))
+            (body.response_text,), changed_by=user["name"])
         return _with_meta(conn, rec)
 
 
 @app.post("/api/cars/{car_id}/decision")
-def decide_car_response(car_id: int, body: m.CarDecision) -> dict:
+def decide_car_response(car_id: int, body: m.CarDecision,
+                        user: dict = Depends(auth.require_writer)) -> dict:
     """Accept or reject the submitted response."""
     with db.get_conn() as conn:
         to_status = "Response Accepted" if body.accept else "Response Rejected"
         rec = _car_transition(
             conn, car_id, {"Response Submitted"}, to_status,
             "response-accepted" if body.accept else "response-rejected", body.notes,
-            ", response_decision_notes = ?", (body.notes,))
+            ", response_decision_notes = ?", (body.notes,), changed_by=user["name"])
         if not body.accept:
             recipient = rec["supplier"] or "responsible-party"
             db.send_notification(conn, "car", car_id, recipient,
@@ -381,16 +498,16 @@ def decide_car_response(car_id: int, body: m.CarDecision) -> dict:
 
 
 @app.post("/api/cars/{car_id}/close")
-def close_car(car_id: int) -> dict:
+def close_car(car_id: int, user: dict = Depends(auth.require_writer)) -> dict:
     with db.get_conn() as conn:
         rec = _car_transition(
             conn, car_id, {"Response Accepted"}, "Closed", "closed", "CAR closed",
-            ", closed_at = datetime('now')")
+            ", closed_at = datetime('now')", changed_by=user["name"])
         return _with_meta(conn, rec)
 
 
 @app.get("/api/cars/{car_id}/response-recommendations")
-def car_response_recs(car_id: int) -> list[dict]:
+def car_response_recs(car_id: int, user: dict = Depends(auth.forbid_supplier)) -> list[dict]:
     with db.get_conn() as conn:
         _get_or_404(conn, "cars", car_id)
         return recommendations.car_response_recommendations(conn, car_id)
@@ -408,7 +525,8 @@ CAPA_TRANSITIONS = {
 
 
 @app.get("/api/capas")
-def list_capas(status: str = "", q: str = "") -> list[dict]:
+def list_capas(status: str = "", q: str = "",
+               user: dict = Depends(auth.forbid_supplier)) -> list[dict]:
     with db.get_conn() as conn:
         sql = "SELECT * FROM capas WHERE 1=1"
         params: list = []
@@ -423,13 +541,14 @@ def list_capas(status: str = "", q: str = "") -> list[dict]:
 
 
 @app.get("/api/capas/assignment-suggestions")
-def capa_assignment(root_cause_category: str = "") -> list[dict]:
+def capa_assignment(root_cause_category: str = "",
+                    user: dict = Depends(auth.forbid_supplier)) -> list[dict]:
     with db.get_conn() as conn:
         return recommendations.capa_assignment_suggestions(conn, root_cause_category)
 
 
 @app.get("/api/capas/{capa_id}")
-def get_capa(capa_id: int) -> dict:
+def get_capa(capa_id: int, user: dict = Depends(auth.forbid_supplier)) -> dict:
     with db.get_conn() as conn:
         rec = _with_meta(conn, _row(_get_or_404(conn, "capas", capa_id)))
         if rec["car_id"]:
@@ -442,7 +561,7 @@ def get_capa(capa_id: int) -> dict:
 
 
 @app.post("/api/capas", status_code=201)
-def create_capa(body: m.CapaIn) -> dict:
+def create_capa(body: m.CapaIn, user: dict = Depends(auth.require_writer)) -> dict:
     with db.get_conn() as conn:
         if body.car_id is not None:
             _get_or_404(conn, "cars", body.car_id)
@@ -453,26 +572,29 @@ def create_capa(body: m.CapaIn) -> dict:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (ref, body.title, body.description, body.car_id, body.rcca_method,
              body.root_cause_category, body.due_date, body.owner_id))
-        db.log_history(conn, "capa", cur.lastrowid, "created", f"{ref}: {body.title}")
+        db.log_history(conn, "capa", cur.lastrowid, "created", f"{ref}: {body.title}",
+                       user["name"])
         return _with_meta(conn, _row(conn.execute(
             "SELECT * FROM capas WHERE id = ?", (cur.lastrowid,)).fetchone()))
 
 
 @app.patch("/api/capas/{capa_id}")
-def update_capa(capa_id: int, body: m.CapaUpdate) -> dict:
+def update_capa(capa_id: int, body: m.CapaUpdate,
+                user: dict = Depends(auth.require_writer)) -> dict:
     with db.get_conn() as conn:
         rec = _row(_get_or_404(conn, "capas", capa_id))
         changes = {k: v for k, v in body.model_dump().items() if v is not None}
         if changes:
             sets = ", ".join(f"{k} = ?" for k in changes) + ", updated_at = datetime('now')"
             conn.execute(f"UPDATE capas SET {sets} WHERE id = ?", (*changes.values(), capa_id))
-            db.log_history(conn, "capa", capa_id, "updated", ", ".join(changes))
+            db.log_history(conn, "capa", capa_id, "updated", ", ".join(changes), user["name"])
         return _with_meta(conn, _row(conn.execute(
             "SELECT * FROM capas WHERE id = ?", (capa_id,)).fetchone()))
 
 
 @app.post("/api/capas/{capa_id}/status")
-def capa_status(capa_id: int, body: m.StatusChange) -> dict:
+def capa_status(capa_id: int, body: m.StatusChange,
+                user: dict = Depends(auth.require_writer)) -> dict:
     with db.get_conn() as conn:
         rec = _row(_get_or_404(conn, "capas", capa_id))
         allowed = CAPA_TRANSITIONS.get(rec["status"], set())
@@ -487,13 +609,14 @@ def capa_status(capa_id: int, body: m.StatusChange) -> dict:
             (body.status, capa_id))
         db.log_history(conn, "capa", capa_id, "status",
                        f"{rec['status']} -> {body.status}" + (f" ({body.note})" if body.note else ""),
-                       body.changed_by)
+                       user["name"])
         return _with_meta(conn, _row(conn.execute(
             "SELECT * FROM capas WHERE id = ?", (capa_id,)).fetchone()))
 
 
 @app.post("/api/capas/{capa_id}/verify")
-def verify_capa(capa_id: int, body: m.CapaVerification) -> dict:
+def verify_capa(capa_id: int, body: m.CapaVerification,
+                user: dict = Depends(auth.require_writer)) -> dict:
     """Audit validation of RCCA effectiveness. Effective -> Closed; not -> rework."""
     with db.get_conn() as conn:
         rec = _row(_get_or_404(conn, "capas", capa_id))
@@ -510,13 +633,13 @@ def verify_capa(capa_id: int, body: m.CapaVerification) -> dict:
              body.verified_by, capa_id))
         db.log_history(conn, "capa", capa_id,
                        "verified-effective" if body.effective else "verified-not-effective",
-                       body.effectiveness_result)
+                       body.effectiveness_result, user["name"])
         return _with_meta(conn, _row(conn.execute(
             "SELECT * FROM capas WHERE id = ?", (capa_id,)).fetchone()))
 
 
 @app.get("/api/capas/{capa_id}/rcca-suggestions")
-def capa_rcca(capa_id: int) -> list[dict]:
+def capa_rcca(capa_id: int, user: dict = Depends(auth.forbid_supplier)) -> list[dict]:
     with db.get_conn() as conn:
         _get_or_404(conn, "capas", capa_id)
         return recommendations.capa_rcca_suggestions(conn, capa_id)
@@ -525,13 +648,13 @@ def capa_rcca(capa_id: int) -> list[dict]:
 # ---------------------------------------------------------------- bulletins
 
 @app.get("/api/bulletins")
-def list_bulletins() -> list[dict]:
+def list_bulletins(user: dict = Depends(auth.forbid_supplier)) -> list[dict]:
     with db.get_conn() as conn:
         return _rows(conn.execute("SELECT * FROM bulletins ORDER BY id DESC"))
 
 
 @app.post("/api/bulletins", status_code=201)
-def create_bulletin(body: m.BulletinIn) -> dict:
+def create_bulletin(body: m.BulletinIn, user: dict = Depends(auth.require_writer)) -> dict:
     """Targeted quality alert bulletin, optionally tied to a CAR."""
     with db.get_conn() as conn:
         if body.car_id is not None:
@@ -540,7 +663,8 @@ def create_bulletin(body: m.BulletinIn) -> dict:
         cur = conn.execute(
             "INSERT INTO bulletins (ref, title, body, car_id, audience, issued_by) VALUES (?, ?, ?, ?, ?, ?)",
             (ref, body.title, body.body, body.car_id, body.audience, body.issued_by))
-        db.log_history(conn, "bulletin", cur.lastrowid, "issued", f"{ref} to {body.audience}")
+        db.log_history(conn, "bulletin", cur.lastrowid, "issued", f"{ref} to {body.audience}",
+                       user["name"])
         db.send_notification(conn, "bulletin", cur.lastrowid, body.audience,
                              f"Quality alert {ref}: {body.title}")
         return _row(conn.execute("SELECT * FROM bulletins WHERE id = ?", (cur.lastrowid,)).fetchone())
@@ -549,9 +673,14 @@ def create_bulletin(body: m.BulletinIn) -> dict:
 # ------------------------------------------------- automated escalation run
 
 @app.post("/api/run-escalation")
-def run_escalation() -> dict:
+def run_escalation(user: dict = Depends(auth.require_writer)) -> dict:
+    """Manual trigger for the escalation sweep (also runs nightly)."""
+    return _run_escalation_sweep()
+
+
+def _run_escalation_sweep() -> dict:
     """Automated tracking and escalation: bump overdue open records one
-    escalation level and notify owners. Intended to run on a schedule."""
+    escalation level and notify owners."""
     LEVELS = ["None", "Level 1", "Level 2", "Executive"]
     escalated = []
     with db.get_conn() as conn:
@@ -587,14 +716,15 @@ IMPORT_COLUMNS = {
 
 
 @app.get("/api/import/template/{entity}")
-def import_template(entity: str) -> dict:
+def import_template(entity: str, user: dict = Depends(auth.require_writer)) -> dict:
     if entity not in IMPORT_COLUMNS:
         raise HTTPException(status_code=404, detail="unknown entity")
     return {"entity": entity, "columns": IMPORT_COLUMNS[entity]}
 
 
 @app.post("/api/import/{entity}")
-async def import_csv(entity: str, file: UploadFile) -> dict:
+async def import_csv(entity: str, file: UploadFile,
+                     user: dict = Depends(auth.require_writer)) -> dict:
     """Migrate existing spreadsheet data. Expects a CSV with a header row;
     only recognized columns are used, the rest are ignored."""
     if entity not in IMPORT_COLUMNS:

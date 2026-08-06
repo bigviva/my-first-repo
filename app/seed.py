@@ -2,8 +2,11 @@
 
 Run: python -m app.seed
 """
+from . import auth
 from . import database as db
 from . import rating
+
+DEMO_PASSWORD = "demo-pass-123"
 
 
 def seed() -> None:
@@ -14,14 +17,16 @@ def seed() -> None:
             return
 
         users = [
-            ("Dana Reyes", "dana.reyes@example.com", "Quality Engineering"),
-            ("Marcus Cole", "marcus.cole@example.com", "Supplier Quality"),
-            ("Priya Nair", "priya.nair@example.com", "Manufacturing Engineering"),
-            ("Tom Alvarez", "tom.alvarez@example.com", "Quality Assurance"),
+            ("Dana Reyes", "dana.reyes@example.com", "Quality Engineering", "admin", ""),
+            ("Marcus Cole", "marcus.cole@example.com", "Supplier Quality", "quality", ""),
+            ("Priya Nair", "priya.nair@example.com", "Manufacturing Engineering", "quality", ""),
+            ("Tom Alvarez", "tom.alvarez@example.com", "Quality Assurance", "viewer", ""),
         ]
-        for name, email, dept in users:
-            conn.execute("INSERT INTO users (name, email, department) VALUES (?, ?, ?)",
-                         (name, email, dept))
+        for name, email, dept, role, supplier in users:
+            conn.execute(
+                """INSERT INTO users (name, email, department, role, password_hash, supplier_name)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (name, email, dept, role, auth.hash_password(DEMO_PASSWORD), supplier))
 
         escapes = [
             ("Cracked bracket shipped to customer", "Customer reported hairline crack in mounting bracket on delivered unit.",
@@ -110,7 +115,10 @@ def seed() -> None:
              "All operators: confirm work instruction revision matches the document portal before each shift. Related to CAR-0002.",
              2, "Manufacturing - All Lines", 4))
         db.log_history(conn, "bulletin", cur.lastrowid, "issued", f"{ref} (seed)")
-        print("Seeded demo data.")
+        print("Seeded demo data. Demo logins (password for all: "
+              f"'{DEMO_PASSWORD}'):")
+        for name, email, _dept, role, _s in users:
+            print(f"  {email:32s} {role}")
 
 
 if __name__ == "__main__":

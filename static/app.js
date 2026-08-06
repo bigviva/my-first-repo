@@ -2,6 +2,10 @@
 
 const $main = document.getElementById("main");
 let users = [];
+let me = null;
+
+const canWrite = () => me && (me.role === "admin" || me.role === "quality");
+const isAdmin = () => me && me.role === "admin";
 
 /* ------------------------------------------------------------ utilities */
 
@@ -109,13 +113,14 @@ views.dashboard = async function () {
   $main.innerHTML = `
     <div class="toolbar">
       <div class="spacer"></div>
-      <button class="secondary" id="run-esc">Run overdue escalation sweep</button>
+      ${canWrite() ? '<button class="secondary" id="run-esc">Run overdue escalation sweep</button>' : ""}
     </div>
     ${section("Escapes", d.escapes)}
     ${section("Corrective Action Reports", d.cars)}
     ${section("CAPA", d.capas)}
     <div class="panel"><h3>Recent activity</h3>${historyHtml(d.recent_history)}</div>`;
-  document.getElementById("run-esc").onclick = async () => {
+  const runEsc = document.getElementById("run-esc");
+  if (runEsc) runEsc.onclick = async () => {
     try {
       const r = await api("/api/run-escalation", { method: "POST" });
       toast(r.count ? `Escalated ${r.count} overdue record(s): ${r.escalated.map(x => x.ref).join(", ")}` : "Nothing overdue to escalate");
@@ -137,7 +142,7 @@ views.escapes = async function () {
       <select id="f-type"><option value="">Internal + External</option>
         <option value="internal">Internal</option><option value="external">External</option>
       </select>
-      <button class="primary" id="new">+ New Escape</button>
+      ${canWrite() ? '<button class="primary" id="new">+ New Escape</button>' : ""}
     </div>
     <div id="list"></div>`;
   const render = list => {
@@ -165,7 +170,8 @@ views.escapes = async function () {
   };
   ["q", "f-status", "f-type"].forEach(id =>
     document.getElementById(id).addEventListener("input", refilter));
-  document.getElementById("new").onclick = () => escapeForm();
+  const newEsc = document.getElementById("new");
+  if (newEsc) newEsc.onclick = () => escapeForm();
 };
 
 function escapeForm() {
@@ -248,10 +254,10 @@ async function escapeDetail(id) {
       <div class="field"><div class="k">Containment plan</div></div>
       <div class="longtext">${esc(r.containment_plan) || "— none yet —"}</div>
       <div class="actions">
-        ${transitions.map(t => `<button class="secondary" data-status="${t}">Move to ${t}</button>`).join("")}
-        <button class="secondary" id="edit">Edit</button>
+        ${canWrite() ? transitions.map(t => `<button class="secondary" data-status="${t}">Move to ${t}</button>`).join("") : ""}
+        ${canWrite() ? `<button class="secondary" id="edit">Edit</button>
         <button class="secondary" id="notify">Send notification</button>
-        <button class="secondary" id="new-car">Raise CAR from this escape</button>
+        <button class="secondary" id="new-car">Raise CAR from this escape</button>` : ""}
       </div>
     </div>
     <div class="panel"><h3>Linked CARs</h3>
@@ -276,7 +282,8 @@ async function escapeDetail(id) {
   document.querySelectorAll("[data-car]").forEach(a => a.onclick = () => {
     navigate("cars"); carDetail(+a.dataset.car);
   });
-  document.getElementById("notify").onclick = () => modal("Send notification", `
+  const notifyBtn = document.getElementById("notify");
+  if (notifyBtn) notifyBtn.onclick = () => modal("Send notification", `
     <form id="f">
       <label>Recipient <input name="recipient" required placeholder="person, team, or customer"></label>
       <label>Message <textarea name="message" required></textarea></label>
@@ -289,7 +296,8 @@ async function escapeDetail(id) {
       wrap.remove(); toast("Notification recorded"); escapeDetail(id);
     };
   });
-  document.getElementById("edit").onclick = () => modal(`Edit ${r.ref}`, `
+  const editEscBtn = document.getElementById("edit");
+  if (editEscBtn) editEscBtn.onclick = () => modal(`Edit ${r.ref}`, `
     <form id="f">
       <label>Title <input name="title" value="${esc(r.title)}"></label>
       <label>Description <textarea name="description">${esc(r.description)}</textarea></label>
@@ -318,7 +326,8 @@ async function escapeDetail(id) {
       } catch (err) { toast(err.message, true); }
     };
   });
-  document.getElementById("new-car").onclick = () => carForm(r.id, r.title);
+  const newCarBtn = document.getElementById("new-car");
+  if (newCarBtn) newCarBtn.onclick = () => carForm(r.id, r.title);
 }
 
 /* ------------------------------------------------------------------ cars */
@@ -332,7 +341,7 @@ views.cars = async function () {
         ${["Draft", "Validated", "Issued", "Response Submitted", "Response Accepted", "Response Rejected", "Closed"]
           .map(s => `<option>${s}</option>`).join("")}
       </select>
-      <button class="primary" id="new">+ New CAR</button>
+      ${canWrite() ? '<button class="primary" id="new">+ New CAR</button>' : ""}
     </div>
     <div id="list"></div>`;
   const render = list => {
@@ -357,7 +366,8 @@ views.cars = async function () {
     render(await api(`/api/cars?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`));
   };
   ["q", "f-status"].forEach(id => document.getElementById(id).addEventListener("input", refilter));
-  document.getElementById("new").onclick = () => carForm();
+  const newCar = document.getElementById("new");
+  if (newCar) newCar.onclick = () => carForm();
 };
 
 function carForm(escapeId, escapeTitle) {
@@ -402,15 +412,18 @@ function carForm(escapeId, escapeTitle) {
 async function carDetail(id) {
   const r = await api(`/api/cars/${id}`);
   const act = [];
-  if (r.status === "Draft") act.push(`<button class="primary" id="a-validate">Validate for issuance</button>`);
-  if (r.status === "Validated") act.push(`<button class="primary" id="a-issue">Issue CAR</button>`);
-  if (r.status === "Issued" || r.status === "Response Rejected")
-    act.push(`<button class="primary" id="a-respond">Submit response</button>`);
-  if (r.status === "Response Submitted") {
-    act.push(`<button class="primary" id="a-accept">Accept response</button>`);
-    act.push(`<button class="danger" id="a-reject">Reject response</button>`);
+  const supplierHere = me && me.role === "supplier";
+  if (canWrite()) {
+    if (r.status === "Draft") act.push(`<button class="primary" id="a-validate">Validate for issuance</button>`);
+    if (r.status === "Validated") act.push(`<button class="primary" id="a-issue">Issue CAR</button>`);
+    if (r.status === "Response Submitted") {
+      act.push(`<button class="primary" id="a-accept">Accept response</button>`);
+      act.push(`<button class="danger" id="a-reject">Reject response</button>`);
+    }
+    if (r.status === "Response Accepted") act.push(`<button class="primary" id="a-close">Close CAR</button>`);
   }
-  if (r.status === "Response Accepted") act.push(`<button class="primary" id="a-close">Close CAR</button>`);
+  if ((canWrite() || supplierHere) && (r.status === "Issued" || r.status === "Response Rejected"))
+    act.push(`<button class="primary" id="a-respond">Submit response</button>`);
   $main.innerHTML = `
     <div class="back"><a class="link" id="back">&larr; All CARs</a></div>
     <div class="panel">
@@ -433,9 +446,9 @@ async function carDetail(id) {
         <div class="longtext">${esc(r.response_decision_notes)}</div>` : ""}
       <div class="actions">
         ${act.join("")}
-        <button class="secondary" id="a-recs">Response recommendations</button>
-        <button class="secondary" id="a-bulletin">Issue quality alert bulletin</button>
-        <button class="secondary" id="a-capa">Create CAPA from this CAR</button>
+        ${!supplierHere ? '<button class="secondary" id="a-recs">Response recommendations</button>' : ""}
+        ${canWrite() ? `<button class="secondary" id="a-bulletin">Issue quality alert bulletin</button>
+        <button class="secondary" id="a-capa">Create CAPA from this CAR</button>` : ""}
       </div>
       <div id="recs"></div>
     </div>
@@ -567,7 +580,7 @@ views.capas = async function () {
         ${["Open", "RCCA In Progress", "Actions In Progress", "Effectiveness Verification", "Closed"]
           .map(s => `<option>${s}</option>`).join("")}
       </select>
-      <button class="primary" id="new">+ New CAPA</button>
+      ${canWrite() ? '<button class="primary" id="new">+ New CAPA</button>' : ""}
     </div>
     <div id="list"></div>`;
   const render = list => {
@@ -593,7 +606,8 @@ views.capas = async function () {
     render(await api(`/api/capas?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`));
   };
   ["q", "f-status"].forEach(id => document.getElementById(id).addEventListener("input", refilter));
-  document.getElementById("new").onclick = () => capaForm();
+  const newCapa = document.getElementById("new");
+  if (newCapa) newCapa.onclick = () => capaForm();
 };
 
 function capaForm(carId, carTitle) {
@@ -683,9 +697,9 @@ async function capaDetail(id) {
       ${r.effectiveness_result ? `<div class="field"><div class="k">Effectiveness verification result</div></div>
         <div class="longtext">${esc(r.effectiveness_result)}</div>` : ""}
       <div class="actions">
-        ${transitions.map(t => `<button class="secondary" data-status="${t}">Move to ${t}</button>`).join("")}
-        ${r.status === "Effectiveness Verification" ? '<button class="primary" id="a-verify">Record effectiveness verification</button>' : ""}
-        <button class="secondary" id="edit">Edit RCCA / actions</button>
+        ${canWrite() ? transitions.map(t => `<button class="secondary" data-status="${t}">Move to ${t}</button>`).join("") : ""}
+        ${canWrite() && r.status === "Effectiveness Verification" ? '<button class="primary" id="a-verify">Record effectiveness verification</button>' : ""}
+        ${canWrite() ? '<button class="secondary" id="edit">Edit RCCA / actions</button>' : ""}
         <button class="secondary" id="a-sug">RCCA suggestions from effective CAPAs</button>
       </div>
       <div id="sug"></div>
@@ -702,7 +716,8 @@ async function capaDetail(id) {
     } catch (e) { toast(e.message, true); }
   });
 
-  document.getElementById("edit").onclick = () => modal(`Edit ${r.ref}`, `
+  const editBtn = document.getElementById("edit");
+  if (editBtn) editBtn.onclick = () => modal(`Edit ${r.ref}`, `
     <form id="f">
       <div class="row">
         <label>RCCA method <select name="rcca_method">
@@ -977,7 +992,7 @@ views.bulletins = async function () {
   const rows = await api("/api/bulletins");
   $main.innerHTML = `
     <div class="toolbar"><div class="spacer"></div>
-      <button class="primary" id="new">+ New bulletin</button></div>
+      ${canWrite() ? '<button class="primary" id="new">+ New bulletin</button>' : ""}</div>
     ${rows.length ? rows.map(b => `
       <div class="panel">
         <h3>${esc(b.ref)} — ${esc(b.title)}</h3>
@@ -986,7 +1001,8 @@ views.bulletins = async function () {
           Audience: <strong>${esc(b.audience)}</strong> &middot; issued ${esc(b.issued_at)}</div>
       </div>`).join("")
     : '<div class="empty">No bulletins issued yet. Bulletins can also be raised from a CAR detail page.</div>'}`;
-  document.getElementById("new").onclick = () => modal("New quality alert bulletin", `
+  const newBul = document.getElementById("new");
+  if (newBul) newBul.onclick = () => modal("New quality alert bulletin", `
     <form id="f">
       <label>Title <input name="title" required></label>
       <label>Body <textarea name="body" required></textarea></label>
@@ -1050,9 +1066,122 @@ views.import = async function () {
   };
 };
 
+/* ----------------------------------------------------------------- users */
+
+views.users = async function () {
+  const list = await api("/api/users");
+  $main.innerHTML = `
+    <div class="toolbar"><div class="spacer"></div>
+      ${isAdmin() ? '<button class="primary" id="new">+ Add user</button>' : ""}</div>
+    <table><thead><tr><th>Name</th><th>Email</th><th>Department</th><th>Role</th>
+      <th>Supplier</th><th>Active</th>${isAdmin() ? "<th></th>" : ""}</tr></thead>
+    <tbody>${list.map(u => `
+      <tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.department)}</td>
+        <td><span class="badge ${u.role === "admin" ? "red" : u.role === "supplier" ? "amber" : u.role === "viewer" ? "gray" : "blue"}">${esc(u.role)}</span></td>
+        <td>${esc(u.supplier_name)}</td>
+        <td>${u.active ? "Yes" : '<span class="badge gray">Deactivated</span>'}</td>
+        ${isAdmin() ? `<td>${u.id === me.id ? "" : `<a class="link" data-toggle="${u.id}" data-active="${u.active}">${u.active ? "Deactivate" : "Reactivate"}</a>`}</td>` : ""}
+      </tr>`).join("")}</tbody></table>`;
+  if (isAdmin()) {
+    document.querySelectorAll("[data-toggle]").forEach(a => a.onclick = async () => {
+      await api(`/api/users/${a.dataset.toggle}`, {
+        method: "PATCH", body: JSON.stringify({ active: a.dataset.active !== "1" }) });
+      views.users();
+    });
+    const newBtn = document.getElementById("new");
+    if (newBtn) newBtn.onclick = () => modal("Add user", `
+      <form id="f">
+        <div class="row">
+          <label>Name <input name="name" required></label>
+          <label>Email <input name="email" type="email" required></label>
+        </div>
+        <div class="row">
+          <label>Department <input name="department"></label>
+          <label>Role <select name="role" id="role-sel">
+            <option value="quality">Quality (read/write)</option>
+            <option value="viewer">Viewer (read-only)</option>
+            <option value="supplier">Supplier (own CARs only)</option>
+            <option value="admin">Admin</option>
+          </select></label>
+        </div>
+        <div class="row">
+          <label>Initial password <input name="password" required minlength="8"></label>
+          <label>Supplier name (supplier role) <input name="supplier_name"></label>
+        </div>
+        <div class="form-actions"><button class="primary">Create</button></div>
+      </form>`, wrap => {
+      wrap.querySelector("#f").onsubmit = async e => {
+        e.preventDefault();
+        try {
+          await api("/api/users", {
+            method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
+          wrap.remove(); toast("User created");
+          users = await api("/api/users"); views.users();
+        } catch (err) { toast(err.message, true); }
+      };
+    });
+  }
+};
+
 /* ------------------------------------------------------------------ init */
 
+function applyRoleUI() {
+  document.getElementById("nav").hidden = false;
+  document.getElementById("whoami").textContent = `${me.name} · ${me.role}`;
+  const logoutBtn = document.getElementById("logout");
+  logoutBtn.hidden = false;
+  logoutBtn.onclick = async () => {
+    try { await api("/api/auth/logout", { method: "POST" }); } catch (_) {}
+    location.reload();
+  };
+  document.querySelectorAll("#nav button").forEach(b => {
+    const v = b.dataset.view;
+    if (me.role === "supplier") b.hidden = v !== "cars";
+    else if (v === "import") b.hidden = !canWrite();
+    else if (v === "users") b.hidden = false;   // list visible to internal roles
+  });
+  if (me.role === "supplier") {
+    document.querySelectorAll("#nav button").forEach(b =>
+      b.classList.toggle("active", b.dataset.view === "cars"));
+  }
+}
+
+function renderLogin() {
+  document.getElementById("nav").hidden = true;
+  $main.innerHTML = `
+    <div class="login-wrap"><div class="panel">
+      <h2>Sign in</h2>
+      <div class="login-error" id="err"></div>
+      <form id="f">
+        <label>Email <input name="email" type="email" required autofocus></label>
+        <label>Password <input name="password" type="password" required></label>
+        <button class="primary" style="width:100%">Sign in</button>
+      </form>
+    </div></div>`;
+  document.getElementById("f").onsubmit = async e => {
+    e.preventDefault();
+    try {
+      await api("/api/auth/login", {
+        method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
+      location.reload();
+    } catch (err) {
+      document.getElementById("err").textContent = err.message;
+    }
+  };
+}
+
 (async function init() {
-  try { users = await api("/api/users"); } catch (_) { users = []; }
-  navigate("dashboard");
+  try {
+    me = await api("/api/auth/me");
+  } catch (_) {
+    renderLogin();
+    return;
+  }
+  applyRoleUI();
+  if (me.role !== "supplier") {
+    try { users = await api("/api/users"); } catch (_) { users = []; }
+    navigate("dashboard");
+  } else {
+    navigate("cars");
+  }
 })();

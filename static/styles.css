@@ -34,6 +34,17 @@ header {
 }
 header h1 { margin: 0; font-size: 18px; }
 header .sub { opacity: 0.75; font-size: 12px; }
+.header-spacer { flex: 1; }
+#whoami { font-size: 13px; opacity: 0.9; align-self: center; }
+#logout { background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.35);
+  border-radius: var(--radius); padding: 6px 12px; font-size: 13px; cursor: pointer;
+  align-self: center; }
+#logout:hover { background: rgba(255,255,255,0.25); }
+
+.login-wrap { max-width: 380px; margin: 80px auto; }
+.login-wrap .panel { padding: 26px; }
+.login-wrap h2 { margin: 0 0 18px; font-size: 18px; }
+.login-error { color: var(--red); font-size: 13px; margin-bottom: 10px; }
 
 nav {
   background: var(--panel);

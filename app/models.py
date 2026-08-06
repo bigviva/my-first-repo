@@ -8,6 +8,28 @@ class UserIn(BaseModel):
     name: str
     email: str
     department: str = ""
+    role: str = Field("quality", pattern="^(admin|quality|viewer|supplier)$")
+    password: str = ""
+    supplier_name: str = ""
+
+
+class UserAdminUpdate(BaseModel):
+    name: Optional[str] = None
+    department: Optional[str] = None
+    role: Optional[str] = Field(None, pattern="^(admin|quality|viewer|supplier)$")
+    active: Optional[bool] = None
+    supplier_name: Optional[str] = None
+    password: Optional[str] = None
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
 
 
 class EscapeIn(BaseModel):

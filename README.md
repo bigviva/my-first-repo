@@ -31,6 +31,13 @@ an audit trail, and built-in recommendations from historical data.
 - Assignment suggestions ranked by each owner's track record of effective
   closures in the same root-cause category, balanced against current workload
 
+**Access control**
+- Login with server-side sessions (PBKDF2-hashed passwords, HttpOnly cookies)
+- Roles: `admin` (user management), `quality` (read/write), `viewer` (read-only),
+  `supplier` (sees only CARs addressed to them; can submit responses)
+- Every history entry is attributed to the signed-in user
+- Built with a contained seam in `app/auth.py` for swapping in OIDC/Entra SSO
+
 **Cross-cutting**
 - Full record linkage: Escape → CAR → CAPA, plus bulletins per CAR
 - Immutable history log on every record
@@ -45,15 +52,25 @@ an audit trail, and built-in recommendations from historical data.
 
 ```bash
 pip install -r requirements.txt
-python -m app.seed          # optional: load demo data
+python -m app.seed          # optional: load demo data + demo accounts
 uvicorn app.main:app --reload
 ```
 
-Open http://localhost:8000 — the UI is served from the same process.
-Interactive API docs are at http://localhost:8000/docs.
+Open http://localhost:8000 and sign in. With seed data, use
+`dana.reyes@example.com` / `demo-pass-123` (admin). Without seed data, an
+admin account is bootstrapped from `ADMIN_EMAIL`/`ADMIN_PASSWORD` env vars
+(dev fallback: `admin@example.com` / `change-me-now` — change it).
 
-Data is stored in `data/corrective_actions.db` (SQLite). Set `CAT_DB_PATH`
-to use a different location.
+Interactive API docs are at http://localhost:8000/docs. Data is stored in
+`data/corrective_actions.db` (SQLite); set `CAT_DB_PATH` to relocate it.
+
+Or with Docker: `cp .env.example .env`, edit it, then
+`docker compose up -d --build`. See **DEPLOYMENT.md** for the full
+production path (SSO, PostgreSQL, ops checklist).
+
+Notifications are logged to the database always, and delivered by email when
+`SMTP_HOST` is configured (see `.env.example`). The overdue escalation sweep
+runs automatically every `ESCALATION_INTERVAL_HOURS` (default 24).
 
 ## Migrating from spreadsheets
 

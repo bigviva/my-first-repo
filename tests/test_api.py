@@ -6,16 +6,23 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+ADMIN_CREDS = {"email": "root@example.com", "password": "test-admin-pw"}
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     db_path = str(tmp_path / "test.db")
     monkeypatch.setenv("CAT_DB_PATH", db_path)
+    monkeypatch.setenv("ADMIN_EMAIL", ADMIN_CREDS["email"])
+    monkeypatch.setenv("ADMIN_PASSWORD", ADMIN_CREDS["password"])
+    monkeypatch.setenv("ESCALATION_INTERVAL_HOURS", "0")
     # database module reads DB_PATH at import; patch the module attribute too
     from app import database
     monkeypatch.setattr(database, "DB_PATH", db_path)
     database.init_db(db_path)
     from app.main import app
     with TestClient(app) as c:
+        assert c.post("/api/auth/login", json=ADMIN_CREDS).status_code == 200
         yield c
 
 
@@ -275,3 +282,78 @@ def test_analytics(client, user):
     assert a["root_cause_pareto"][0]["label"] == "Process"
     assert a["car_first_pass_acceptance"] == 100
     assert a["escalation_distribution"]["labels"] == ["None", "Level 1", "Level 2", "Executive"]
+
+
+def test_requests_without_session_are_rejected(client):
+    from app.main import app
+    with TestClient(app) as anon:
+        assert anon.get("/api/dashboard").status_code == 401
+        assert anon.get("/api/escapes").status_code == 401
+        assert anon.post("/api/cars", json={"title": "x"}).status_code == 401
+
+
+def test_login_rejects_bad_password(client):
+    from app.main import app
+    with TestClient(app) as anon:
+        r = anon.post("/api/auth/login",
+                      json={"email": ADMIN_CREDS["email"], "password": "wrong"})
+        assert r.status_code == 401
+
+
+def test_viewer_is_read_only(client):
+    client.post("/api/users", json={
+        "name": "Vera Viewer", "email": "viewer@example.com",
+        "role": "viewer", "password": "viewer-pw-1"})
+    client.post("/api/escapes", json={"title": "Visible escape"})
+    from app.main import app
+    with TestClient(app) as v:
+        v.post("/api/auth/login", json={"email": "viewer@example.com", "password": "viewer-pw-1"})
+        assert v.get("/api/escapes").status_code == 200
+        assert v.get("/api/analytics").status_code == 200
+        assert v.post("/api/escapes", json={"title": "nope"}).status_code == 403
+        assert v.post("/api/run-escalation").status_code == 403
+
+
+def test_supplier_scoped_to_own_cars(client):
+    client.post("/api/users", json={
+        "name": "Weld Rep", "email": "rep@weldco.com", "role": "supplier",
+        "password": "supplier-pw", "supplier_name": "WeldCo"})
+    mine = client.post("/api/cars", json={
+        "title": "WeldCo CAR", "car_type": "external", "supplier": "WeldCo"}).json()
+    other = client.post("/api/cars", json={
+        "title": "Other CAR", "car_type": "external", "supplier": "OtherCo"}).json()
+    client.post(f"/api/cars/{mine['id']}/validate", json={"approved": True})
+    client.post(f"/api/cars/{mine['id']}/issue")
+    from app.main import app
+    with TestClient(app) as s:
+        s.post("/api/auth/login", json={"email": "rep@weldco.com", "password": "supplier-pw"})
+        titles = [c["title"] for c in s.get("/api/cars").json()]
+        assert titles == ["WeldCo CAR"]
+        assert s.get(f"/api/cars/{other['id']}").status_code == 403
+        assert s.get("/api/dashboard").status_code == 403
+        assert s.get("/api/escapes").status_code == 403
+        # supplier can respond to their own CAR
+        r = s.post(f"/api/cars/{mine['id']}/respond",
+                   json={"response_text": "Root cause identified, process updated."})
+        assert r.status_code == 200
+        assert r.json()["status"] == "Response Submitted"
+        # but cannot accept their own response
+        assert s.post(f"/api/cars/{mine['id']}/decision",
+                      json={"accept": True}).status_code == 403
+
+
+def test_history_records_real_user(client):
+    esc = client.post("/api/escapes", json={"title": "Attributed escape"}).json()
+    history = client.get(f"/api/escapes/{esc['id']}").json()["history"]
+    assert history[0]["changed_by"] == "Administrator"
+
+
+def test_admin_can_deactivate_user(client):
+    u = client.post("/api/users", json={
+        "name": "Temp", "email": "temp@example.com", "password": "temp-pw-123"}).json()
+    from app.main import app
+    with TestClient(app) as t:
+        assert t.post("/api/auth/login",
+                      json={"email": "temp@example.com", "password": "temp-pw-123"}).status_code == 200
+        client.patch(f"/api/users/{u['id']}", json={"active": False})
+        assert t.get("/api/dashboard").status_code == 401
